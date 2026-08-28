@@ -1,0 +1,18 @@
+# machine-specific tool paths, written by setup.sh
+local.mk
+
+# simulation / build artifacts
+build/
+*.vvp
+*.vcd
+*.log
+
+# python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# ORFS outputs + generated configs (WORK_HOME/DESIGN_HOME point here)
+work/

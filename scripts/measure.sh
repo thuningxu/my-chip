@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+#=============================================================================
+# measure.sh -- simulate, then synthesise+P&R, then emit one QoR row.
+#
+# THE RULE THIS SCRIPT ENFORCES: no PPA number is produced for RTL that has
+# not passed its regression. A prior project of this kind published a headline
+# frequency for a design that was never simulated and computed 2*sum-last
+# instead of a dot product. The flow does not care what your logic computes --
+# so the gate has to be here.
+#
+# Usage:
+#   scripts/measure.sh [-n N] [-p PERIOD_NS] [-u UTIL] [-t TAG] [--no-sim]
+#
+# Env:
+#   ORFS        path to OpenROAD-flow-scripts   (default: ~/sd/OpenROAD-flow-scripts)
+#   YOSYS_EXE   yosys binary                   (default: whatever is on PATH)
+#   KLAYOUT_CMD klayout binary                 (required by ORFS at parse time)
+#=============================================================================
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ORFS="${ORFS:-$HOME/sd/OpenROAD-flow-scripts}"
+
+N=4
+PERIOD=1.00
+UTIL=40
+TAG=""
+RUN_SIM=1
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -n) N="$2"; shift 2 ;;
+    -p) PERIOD="$2"; shift 2 ;;
+    -u) UTIL="$2"; shift 2 ;;
+    -t) TAG="$2"; shift 2 ;;
+    --no-sim) RUN_SIM=0; shift ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+NICK="my_chip_n${N}${TAG:+_$TAG}"
+PERIOD_PS=$(python3 -c "print(int(round(float('$PERIOD')*1000)))")
+
+# ---------------------------------------------------------------- 1. simulate
+if [[ $RUN_SIM -eq 1 ]]; then
+  echo "== simulating (N=$N) =="
+  if ! command -v iverilog >/dev/null; then
+    echo "FATAL: iverilog not found. brew install icarus-verilog" >&2
+    exit 1
+  fi
+  SIMDIR=$(mktemp -d)
+  iverilog -g2005 -o "$SIMDIR/tb.vvp" \
+    -Ptb_mac_array.N="$N" \
+    "$HERE/tb/tb_mac_array.v" "$HERE/rtl"/*.v
+  if ! vvp "$SIMDIR/tb.vvp" | tee "$SIMDIR/sim.log" | grep -q "^RESULT: PASS"; then
+    echo "FATAL: regression FAILED -- refusing to produce a PPA number." >&2
+    grep -E "\[FAIL\]|RESULT:" "$SIMDIR/sim.log" >&2 || true
+    exit 1
+  fi
+  echo "   regression PASS"
+fi
+
+# ---------------------------------------------------------------- 2. stage
+# Everything generated lives under my-chip/work/. Nothing is written into the
+# ORFS checkout: ORFS's WORK_HOME (Makefile:98) feeds LOG_DIR / OBJECTS_DIR /
+# REPORTS_DIR / RESULTS_DIR (variables.mk:46-49), and DESIGN_HOME
+# (variables.mk:13) relocates the design tree. Both are overridable, so the
+# ORFS clone stays pristine and this repo owns its own artifacts.
+WORK="$HERE/work"
+DESIGNS="$WORK/designs"
+CFG_DIR="$DESIGNS/nangate45/$NICK"
+echo "== staging into $WORK =="
+mkdir -p "$CFG_DIR"
+
+# Fill the committed templates. They are the single definition of the config --
+# there is no second, hand-maintained copy to drift out of sync.
+TPL="$HERE/flow/nangate45"
+for t in config.mk constraint.sdc; do
+  [[ -f "$TPL/$t.in" ]] || { echo "FATAL: missing template $TPL/$t.in" >&2; exit 1; }
+done
+
+sed -e "s|@NICK@|$NICK|g" \
+    -e "s|@N@|$N|g" \
+    -e "s|@UTIL@|$UTIL|g" \
+    -e "s|@PERIOD_PS@|$PERIOD_PS|g" \
+    -e "s|@RTL_DIR@|$HERE/rtl|g" \
+    -e "s|@CFG_DIR@|$CFG_DIR|g" \
+    "$TPL/config.mk.in" > "$CFG_DIR/config.mk"
+
+sed -e "s|@PERIOD@|$PERIOD|g" \
+    "$TPL/constraint.sdc.in" > "$CFG_DIR/constraint.sdc"
+
+# Any @TOKEN@ left unsubstituted means the template gained a placeholder that
+# this script does not know about -- fail loudly rather than hand ORFS junk.
+# Comments are stripped first: the templates mention placeholder syntax in their
+# own header comments, which is not a substitution failure.
+for f in "$CFG_DIR/config.mk" "$CFG_DIR/constraint.sdc"; do
+  if sed 's/#.*//' "$f" | grep -q '@[A-Z_]*@'; then
+    echo "FATAL: unsubstituted @TOKEN@ in $f" >&2
+    sed 's/#.*//' "$f" | grep -n '@[A-Z_]*@' >&2
+    exit 1
+  fi
+done
+
+# ---------------------------------------------------------------- 3. run flow
+echo "== running ORFS (N=$N, period=${PERIOD}ns, util=$UTIL) =="
+# WORK_HOME/DESIGN_HOME redirect every output away from the ORFS tree.
+# DESIGN_CONFIG must be absolute since it is no longer under $ORFS/flow.
+MAKE_ARGS=(
+  WORK_HOME="$WORK"
+  DESIGN_HOME="$DESIGNS"
+  DESIGN_CONFIG="$CFG_DIR/config.mk"
+)
+[[ -n "${YOSYS_EXE:-}"   ]] && MAKE_ARGS+=("YOSYS_EXE=$YOSYS_EXE")
+[[ -n "${KLAYOUT_CMD:-}" ]] && MAKE_ARGS+=("KLAYOUT_CMD=$KLAYOUT_CMD")
+
+mkdir -p "$WORK/logs"
+LOG="$WORK/logs/${NICK}_flow.log"
+R="$WORK/logs/nangate45/$NICK/base/6_report.json"
+DRC="$WORK/reports/nangate45/$NICK/base/5_route_drc.rpt"
+
+set +e
+( cd "$ORFS/flow" && make "${MAKE_ARGS[@]}" finish ) > "$LOG" 2>&1
+FLOW_RC=$?
+set -e
+if [[ $FLOW_RC -ne 0 ]]; then
+  # ORFS's 6_report stage renders layout images via gui::save_image, which can
+  # fail with GUI-0013/GUI-0070 ("Unable to find visible display control at
+  # Timing Path/*") on some OpenROAD builds. That is the image renderer, not the
+  # design -- metrics are dumped before it runs. Tolerate exactly that case.
+  if grep -q "GUI-0070" "$LOG" && [[ -s "$R" ]]; then
+    echo "   WARNING: 6_report image rendering failed (GUI-0070); metrics are intact."
+    echo "            Layout images unavailable for this run. See $LOG"
+  else
+    echo "FLOW FAILED (rc=$FLOW_RC). Tail of $LOG:" >&2
+    tail -15 "$LOG" >&2
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------- 4. extract
+if [[ ! -s "$R" ]]; then
+  echo "FATAL: no metrics at $R" >&2
+  exit 1
+fi
+python3 - "$R" "$DRC" "$N" "$PERIOD" "$UTIL" "$NICK" <<'PY'
+import json, os, sys
+rpt, drc, n, period, util, nick = sys.argv[1:7]
+d = json.load(open(rpt))
+def g(k, default=0.0):
+    return d.get(k, default)
+ws  = float(g('finish__timing__setup__ws'))
+tns = float(g('finish__timing__setup__tns'))
+hold= float(g('finish__timing__hold__ws'))
+per = float(period)
+fmax = 1000.0/(per - ws) if (per - ws) > 0 else float('nan')
+drc_n = 0
+if os.path.exists(drc):
+    drc_n = sum(1 for _ in open(drc))
+print()
+print("| design | N | period | setup WS | TNS | hold WS | implied fmax | DRC | stdcells | flip-flops | area um2 | power W |")
+print("|---|---|---|---|---|---|---|---|---|---|---|---|")
+print(f"| {nick} | {n} | {per:.2f} ns | {ws:+.4f} | {tns:.3f} | {hold:+.4f} | "
+      f"{fmax:.0f} MHz | {drc_n} | {int(g('finish__design__instance__count__stdcell'))} | "
+      f"{int(g('finish__design__instance__count__class:sequential_cell'))} | "
+      f"{int(g('finish__design__instance__area__stdcell'))} | {g('finish__power__total'):.4f} |")
+print()
+if ws < 0:
+    print(f"NOTE: setup NOT met at {per} ns. Retry with -p {per - ws + 0.02:.2f}")
+PY

@@ -1,0 +1,29 @@
+# TEMPLATE -- scripts/measure.sh substitutes placeholder tokens and writes the result to
+# work/designs/nangate45/<nick>/config.mk.
+#
+# Edit THIS file, not the generated copy. The copy under work/ is regenerated on
+# every run and is gitignored.
+#
+# Absolute paths appear here only via placeholders that measure.sh fills in with
+# repo-local locations. Nothing points into the ORFS checkout: WORK_HOME and
+# DESIGN_HOME (passed on the make command line) keep every artifact in-repo.
+export DESIGN_NAME     = mac_array
+export DESIGN_NICKNAME = @NICK@
+export PLATFORM        = nangate45
+
+# RTL is read straight out of the repo -- never copied.
+export VERILOG_FILES = $(wildcard @RTL_DIR@/*.v)
+export SDC_FILE      = @CFG_DIR@/constraint.sdc
+
+# Array size. Verified to scale the design through synthesis: flip-flop counts
+# match N*N*24 + control at both N=4 and N=16.
+export VERILOG_TOP_PARAMS = N @N@
+
+export CORE_UTILIZATION       = @UTIL@
+export PLACE_DENSITY_LB_ADDON = 0.2
+
+# Strips source-line attributes so the netlist hash is stable when comments move.
+export SYNTH_REPEATABLE_BUILD = 1
+
+# Kept in step with the SDC period by measure.sh -- do not set independently.
+export ABC_CLOCK_PERIOD_IN_PS = @PERIOD_PS@
