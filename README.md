@@ -154,6 +154,21 @@ prior project of this kind:
   useless for finding the datapath limiter. Always pass `-path_group core_clock`
   (`scripts/report_path.sh` does).
 
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Covers the contents of this repository only: the RTL, testbench, scripts,
+templates and docs, all of which are original. It does **not** cover the tools
+this project drives or the PDK it targets, none of which are vendored here:
+
+| Not covered | Licensed separately |
+|---|---|
+| OpenROAD / ORFS | BSD-3-Clause |
+| Yosys | ISC |
+| Nangate45 PDK | its own terms — ships inside ORFS |
+| Icarus Verilog | GPL-2.0 |
+
 ## Honest scope
 
 Nangate45 is a teaching PDK with no fab target, and `measure.sh` reports the
