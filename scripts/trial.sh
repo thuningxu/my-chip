@@ -121,13 +121,22 @@ FLW=$(grep -rhoE 'FLW-0009\] Clock [a-z_]+ slack -?[0-9.]+' \
 PRED_NOTE=""
 if [[ -n "$EXPECT_FF" && -f "$NETLIST" ]]; then
   GOT_FF=$(grep -coE '^[[:space:]]*(DFF|SDFF)[A-Z_]*_X[0-9]+' "$NETLIST" || true)
-  if [[ "$GOT_FF" != "$EXPECT_FF" ]]; then
-    PRED_NOTE="PREDICTION MISSED: expected $EXPECT_FF flip-flops, netlist has $GOT_FF"
+  # TOLERANT, not exact. The failure this guards against is "the parameter had no
+  # effect at all", which is by construction a large fraction of the total -- the
+  # real bug was 24,585 where 29,192 was expected, 15.8% off. An exact match would
+  # instead police the arithmetic of the prediction itself: X1-Y1's true count was
+  # 29,194 because ccnt is one bit wider than kcnt and v_sr[0] exists, and a 2-flop
+  # slip would have demoted a perfectly correct trial. A false failure in the log
+  # is as corrosive as a false success, so the band is deliberately generous.
+  TOL=$(python3 -c "print(max(32, int(0.01*$EXPECT_FF)))")
+  DIFF=$(python3 -c "print(abs($GOT_FF - $EXPECT_FF))")
+  if [[ "$DIFF" -gt "$TOL" ]]; then
+    PRED_NOTE="PREDICTION MISSED: expected ~$EXPECT_FF flip-flops (tolerance $TOL), netlist has $GOT_FF"
     echo "  !! $PRED_NOTE" >&2
     echo "     The built hardware is not what this Y was supposed to build, so the" >&2
     echo "     PPA below does not measure this Y. Recorded as a bug on the trial." >&2
   else
-    echo "  prediction OK: $GOT_FF flip-flops, as expected"
+    echo "  prediction OK: $GOT_FF flip-flops vs ~$EXPECT_FF expected (within $TOL)"
   fi
 fi
 

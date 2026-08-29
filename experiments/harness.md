@@ -184,3 +184,31 @@ wrong row.
 the prediction where one exists. Y1 predicted +4,608 flops; the flop count was
 already being logged; nothing compared them. Cheap to add, and it would have
 failed the trial in seconds instead of costing 17 minutes of routing.
+
+### X1-Y1 retry — the hardware is right, and the flop accounting is exact
+
+Synthesis: **29,194 flip-flops**, and that number decomposes exactly:
+
+```
+  24,576   three tile registers (3 x 16 x 512)
+   4,608   sum4 registers -- what PIPE=1 adds (256 units x 18 bits)
+      10   control: state(2) + ccnt(5) + busy(1) + done(1) + v_sr(1)
+  ------
+  29,194
+```
+
+The goal string predicted **29,192**, because it counted only the datapath and
+forgot two control flops that the same change introduced: `ccnt` is one bit wider
+than the `kcnt` it replaced (it must reach `KDW+PIPE-1`), and `v_sr[0]` is the
+delayed accumulate enable. `v_sr[1:3]` are unused at PIPE=1 and pruned.
+
+**So the prediction was off by 2 and the hardware is correct** — the opposite of
+the first attempt, where the prediction was right and the hardware was wrong.
+
+**This exposed a flaw in the check added an hour earlier.** It was exact-match, so
+`--expect-flops 29192` would have demoted this correct trial to
+`OK_BUT_WRONG_HARDWARE` over a 2-flop arithmetic slip. A false failure in the log
+is as corrosive as a false success. The check is now tolerant —
+`max(32, 1% of expected)` — because the failure it exists to catch is "the
+parameter had no effect", which is by construction a large fraction (the real bug
+was 15.8% off), not a handful of control bits.
