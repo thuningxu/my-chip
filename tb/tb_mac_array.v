@@ -16,6 +16,34 @@
 //   T6 restart, no reset  -- catches DONE being a terminal state.
 //   T7/T8 random          -- general regression against an independent model.
 //
+// T1..T8 are the PRE-ADDEND suite and are called through the original two-arg
+// run_case(). They must keep passing with identical cycle counts; that is the
+// backward-compatibility proof for the init_mode/c_in work. Do not port them to
+// run_case_m().
+//
+// The addend cases below were each confirmed to have teeth by mutating the RTL
+// and checking that they, specifically, fail:
+//
+//   A1..A3 INIT_KEEP chain -- catch a chain that clears anyway.
+//   A4 INIT_KEEP with K=0  -- the accumulator must not move at all.
+//   A5 INIT_ZERO after KEEP-- THE negative test: adding chaining must not have
+//                             turned the clear into a no-op. Nothing else
+//                             catches a clear that silently stopped working
+//                             only in the modes exercised after a chain.
+//   B1 c=0                 -- INIT_C must be identical to INIT_ZERO here.
+//   B2 c distinct, K=0     -- isolates the preload: nothing is accumulated, so
+//                             D must equal C exactly. Catches a transposed
+//                             c_in index -- which is why set_c_pattern is
+//                             ASYMMETRIC. Uniform C would hide it completely.
+//   B3 c distinct, K=4     -- preload plus real accumulation.
+//   B4 c wide + negative   -- the ONLY case that catches a c_in slice which
+//                             drops the top bit. Verified by mutation: that bug
+//                             passes B1, B2, B3 and M2 and fails B4 alone.
+//   M1/M2                  -- D = A@B (+C) against a TEXTBOOK triple loop over
+//                             untransposed matrices, i.e. a third model beyond
+//                             compute_expected. a_mat/b_mat are asymmetric on
+//                             purpose: a symmetric A hides a lost transpose.
+//
 // The expected value is computed here from the same memory contents, by a
 // separate triple loop. It is NOT taken from the DUT.
 //=============================================================================
@@ -25,14 +53,30 @@ module tb_mac_array;
     parameter integer N     = 4;
     parameter integer KW    = 16;
     parameter integer ACC_W = 24;
+    // C_PORT=0 prunes the external-C hardware. The INIT_C cases below are
+    // skipped in that build rather than silently reinterpreted -- driving
+    // INIT_C with C_PORT=0 is a design error the DUT reports at runtime.
+    parameter integer C_PORT = 1;
     localparam integer DEPTH = 4096;
     localparam integer NN    = N*N;
     localparam integer OAW   = (NN <= 2) ? 1 : $clog2(NN);
+
+    // Mirrors the DUT's encoding. Verilog-2005 has no package mechanism, so this
+    // duplication is unavoidable; INIT_ZERO must stay 0 so an undriven port
+    // reproduces the pre-addend behaviour.
+    localparam [1:0] INIT_ZERO = 2'd0,
+                     INIT_C    = 2'd1,
+                     INIT_KEEP = 2'd2;
 
     reg                      clk = 1'b0;
     reg                      rst_n = 1'b0;
     reg                      start = 1'b0;
     reg  [KW-1:0]            k_dim = {KW{1'b0}};
+    reg  [1:0]               init_mode = INIT_ZERO;
+    reg  [NN*ACC_W-1:0]      c_in = {(NN*ACC_W){1'b0}};
+    // unpacked mirror of c_in, so the reference model and the packer cannot
+    // disagree about the layout by construction
+    reg signed [ACC_W-1:0]   c_val [0:NN-1];
     wire                     busy, done;
 
     wire                     act_req, wgt_req;
@@ -53,9 +97,10 @@ module tb_mac_array;
     end
 
     // ---- DUT ----------------------------------------------------------------
-    mac_array #(.N(N), .KW(KW), .ACC_W(ACC_W)) dut (
+    mac_array #(.N(N), .KW(KW), .ACC_W(ACC_W), .C_PORT(C_PORT)) dut (
         .clk(clk), .rst_n(rst_n),
         .start(start), .k_dim(k_dim), .busy(busy), .done(done),
+        .init_mode(init_mode), .c_in(c_in),
         .act_req(act_req), .act_addr(act_addr), .act_rdata(act_rdata),
         .wgt_req(wgt_req), .wgt_addr(wgt_addr), .wgt_rdata(wgt_rdata),
         .out_we(out_we), .out_addr(out_addr), .out_wdata(out_wdata)
@@ -77,13 +122,20 @@ module tb_mac_array;
     // ---- independent reference ----------------------------------------------
     reg signed [ACC_W-1:0] expected [0:NN-1];
 
-    task compute_expected(input integer k);
+    // The starting value is now part of the model. INIT_KEEP deliberately leaves
+    // expected[] untouched, so it carries over from the previous case -- which is
+    // exactly the chaining semantics being tested, expressed as the absence of
+    // an assignment in both the DUT and the reference.
+    task compute_expected(input integer k, input [1:0] mode);
         integer kk, ii, jj;
         reg [N*4-1:0] aw, ww;
         reg signed [3:0] av, wv;
         begin
-            for (ii = 0; ii < NN; ii = ii + 1)
-                expected[ii] = {ACC_W{1'b0}};
+            for (ii = 0; ii < NN; ii = ii + 1) begin
+                if (mode == INIT_ZERO)     expected[ii] = {ACC_W{1'b0}};
+                else if (mode == INIT_C)   expected[ii] = c_val[ii];
+                // INIT_KEEP: no assignment
+            end
             for (kk = 0; kk < k; kk = kk + 1) begin
                 aw = amem[kk];
                 ww = wmem[kk];
@@ -103,15 +155,25 @@ module tb_mac_array;
     integer fail_count = 0;
     integer cyc_count;
 
+    // Preserved signature: the original nine cases call this and must keep
+    // passing byte-for-byte. That is the backward-compatibility proof for the
+    // addend work, so do not fold these two tasks together.
     task run_case(input [8*24:1] name, input integer k);
+        begin
+            run_case_m(name, k, INIT_ZERO);
+        end
+    endtask
+
+    task run_case_m(input [8*24:1] name, input integer k, input [1:0] mode);
         integer idx, guard;
         begin
-            compute_expected(k);
+            compute_expected(k, mode);
             seen      = {NN{1'b0}};
             cyc_count = 0;
 
-            k_dim <= k[KW-1:0];
-            start <= 1'b1;
+            k_dim     <= k[KW-1:0];
+            init_mode <= mode;
+            start     <= 1'b1;
             @(posedge clk);
             start <= 1'b0;
 
@@ -178,6 +240,105 @@ module tb_mac_array;
         end
     endtask
 
+    // ---- C tile helpers -----------------------------------------------------
+    // c_val is the single source of truth; c_in is packed from it, and the
+    // reference model reads c_val. The packer and the model therefore cannot
+    // disagree about the layout -- only the DUT can, which is the point.
+    task pack_c;
+        integer e;
+        begin
+            c_in = {(NN*ACC_W){1'b0}};
+            for (e = 0; e < NN; e = e + 1)
+                c_in[e*ACC_W +: ACC_W] = c_val[e];
+        end
+    endtask
+
+    task set_c_zero;
+        integer e;
+        begin
+            for (e = 0; e < NN; e = e + 1) c_val[e] = {ACC_W{1'b0}};
+            pack_c;
+        end
+    endtask
+
+    // Distinct per element AND asymmetric under (i,j)->(j,i): C[0][1] must
+    // differ from C[1][0], or a transposed c_in packing passes unnoticed.
+    task set_c_pattern;
+        integer i, j;
+        begin
+            for (i = 0; i < N; i = i + 1)
+                for (j = 0; j < N; j = j + 1)
+                    c_val[i*N + j] = 1000*(i+1) + (j+1);
+            pack_c;
+        end
+    endtask
+
+    // Bits in the TOP byte of ACC_W, and both signs. Catches a c_in slice that
+    // is too narrow (`+: 8` instead of `+: ACC_W`) and a zero-extended load.
+    task set_c_extreme;
+        integer e;
+        begin
+            for (e = 0; e < NN; e = e + 1)
+                c_val[e] = (e % 2 == 0) ?   ((1 << (ACC_W-4)) + e)
+                                        : - ((1 << (ACC_W-5)) + e);
+            pack_c;
+        end
+    endtask
+
+    // ---- the matrix-product claim ------------------------------------------
+    // compute_expected models the outer-product accumulation. It and the DUT
+    // could agree perfectly and the result still not be a matrix product. So
+    // fill A COLUMN-major and B ROW-major, then check against a textbook triple
+    // loop over the UNTRANSPOSED matrices. This is a third, independent model.
+    reg signed [3:0] a_mat [0:N-1][0:N-1];
+    reg signed [3:0] b_mat [0:N-1][0:N-1];
+
+    task check_matmul(input [8*24:1] name, input [1:0] mode);
+        integer i, j, k, e, bad;
+        reg [N*4-1:0] w;
+        reg signed [ACC_W-1:0] mm;
+        begin
+            // Asymmetric on purpose. If A were symmetric, a missing or doubled
+            // transpose anywhere in the path would be completely invisible.
+            for (i = 0; i < N; i = i + 1)
+                for (j = 0; j < N; j = j + 1) begin
+                    a_mat[i][j] = ((i*N + j)*5 + 3) % 16 - 8;
+                    b_mat[i][j] = ((j*N + i)*7 + 1) % 16 - 8;
+                end
+            for (k = 0; k < N; k = k + 1) begin
+                w = {(N*4){1'b0}};
+                for (i = 0; i < N; i = i + 1) w[i*4 +: 4] = a_mat[i][k];
+                amem[k] = w;                              // column k of A
+                w = {(N*4){1'b0}};
+                for (j = 0; j < N; j = j + 1) w[j*4 +: 4] = b_mat[k][j];
+                wmem[k] = w;                              // row k of B
+            end
+
+            run_case_m(name, N, mode);                    // DUT vs outer-product
+
+            bad = 0;
+            for (i = 0; i < N; i = i + 1)
+                for (j = 0; j < N; j = j + 1) begin
+                    e  = i*N + j;
+                    mm = (mode == INIT_C) ? c_val[e] : {ACC_W{1'b0}};
+                    for (k = 0; k < N; k = k + 1)
+                        mm = mm + a_mat[i][k] * b_mat[k][j];
+                    if (got[e] !== mm) begin
+                        if (bad == 0)
+                            $display("  [FAIL] %0s : textbook mismatch D[%0d][%0d] got %0d expected %0d",
+                                     name, i, j, got[e], mm);
+                        bad = bad + 1;
+                    end
+                end
+            if (bad == 0) begin
+                $display("  [PASS] %-22s   ... and vs textbook A@B triple loop", name);
+                pass_count = pass_count + 1;
+            end else begin
+                fail_count = fail_count + 1;
+            end
+        end
+    endtask
+
     integer sd = 32'hC0FFEE;
 
     initial begin
@@ -212,6 +373,43 @@ module tb_mac_array;
         fill_random(sd);
         run_case("T7 random K=37", 37);
         run_case("T8 random K=1024", 1024);
+
+        // ===== everything above is the pre-addend suite, unchanged. If any of
+        // T1..T8 regresses, the addend work broke the baseline. =====
+
+        // A-series -- INIT_KEEP, i.e. D = A@B + D_prev. Chaining k-tiles.
+        fill_const(4'sd1, 4'sd1);
+        run_case_m("A1 keep base K=4",   4, INIT_ZERO);   // -> 4
+        run_case_m("A2 keep +K=4",       4, INIT_KEEP);   // -> 8
+        run_case_m("A3 keep +K=4 again", 4, INIT_KEEP);   // -> 12
+        run_case_m("A4 keep K=0 noop",   0, INIT_KEEP);   // -> 12, must not move
+        run_case_m("A5 zero re-clears",  4, INIT_ZERO);   // -> 4. THE negative
+        //   test: chaining must not have turned the clear into a no-op.
+
+        // B-series -- INIT_C, i.e. D = A@B + c_in with C supplied externally.
+        if (C_PORT != 0) begin
+            set_c_zero;
+            run_case_m("B1 c=0 K=4",         4, INIT_C);  // must equal INIT_ZERO
+            set_c_pattern;
+            run_case_m("B2 c=distinct K=0",  0, INIT_C);  // D == C exactly:
+            //   with K=0 nothing is accumulated, so this isolates the preload
+            //   path. An index swap, a short slice or a dropped element shows
+            //   up here and nowhere else.
+            run_case_m("B3 c=distinct K=4",  4, INIT_C);
+            set_c_extreme;
+            run_case_m("B4 c=wide+neg K=3",  3, INIT_C);
+            set_c_zero;
+        end else begin
+            $display("  [SKIP] B-series (INIT_C) -- built with C_PORT=0");
+        end
+
+        // M-series -- the matrix-product claim, against a third model.
+        check_matmul("M1 D=A@B", INIT_ZERO);
+        if (C_PORT != 0) begin
+            set_c_pattern;
+            check_matmul("M2 D=A@B+C", INIT_C);
+            set_c_zero;
+        end
 
         $display("=== %0d passed, %0d failed ===", pass_count, fail_count);
         if (fail_count != 0) $display("RESULT: FAIL");

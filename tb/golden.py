@@ -36,19 +36,32 @@ def outer_product_accumulate(A, B, n, k_dim):
     return C
 
 
-def accumulator_bound(k_max: int) -> int:
+def accumulator_bound(k_max: int, tiles: int = 1, c_max: int = 0) -> int:
     """Worst-case |accumulator| for INT4 x INT4 over k_max terms.
 
     max |product| = |-8 * -8| = 64.  Run this before changing ACC_W.
+
+    tiles -- chain depth for INIT_KEEP (D = A@B + D_prev). The whole point of
+        chaining is that the sum SURVIVES across operations, so the bound scales
+        with how many tiles you chain. A width that is safe for one tile can
+        overflow on the fourth, and nothing in the RTL will tell you.
+    c_max -- worst-case |C| for INIT_C. An externally supplied addend is not
+        bounded by k_dim at all, so it has to be stated, not derived.
     """
-    return 64 * k_max
+    return 64 * k_max * tiles + abs(c_max)
 
 
-def check_width(acc_w: int, k_max: int) -> bool:
+def check_width(acc_w: int, k_max: int, tiles: int = 1, c_max: int = 0) -> bool:
     limit = (1 << (acc_w - 1)) - 1
-    need = accumulator_bound(k_max)
+    need = accumulator_bound(k_max, tiles, c_max)
     ok = need <= limit
-    print(f"ACC_W={acc_w}: need {need:,} <= {limit:,}  -> {'OK' if ok else 'OVERFLOW'}"
+    extra = ""
+    if tiles != 1:
+        extra += f", chained x{tiles}"
+    if c_max:
+        extra += f", |C|<={c_max:,}"
+    print(f"ACC_W={acc_w}: need {need:,} <= {limit:,}{extra}"
+          f"  -> {'OK' if ok else 'OVERFLOW'}"
           f"{'' if not ok else f' ({limit/need:.1f}x margin)'}")
     return ok
 
@@ -60,10 +73,16 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--acc-w", type=int, default=24)
     ap.add_argument("--kw", type=int, default=16)
+    ap.add_argument("--tiles", type=int, default=1,
+                    help="INIT_KEEP chain depth: the accumulator bound scales "
+                         "with it, because chaining is the sum surviving")
+    ap.add_argument("--c-max", type=int, default=0,
+                    help="worst-case |C| for INIT_C; an external addend is not "
+                         "bounded by k_dim")
     args = ap.parse_args()
 
     print(f"# width check for KW={args.kw}, ACC_W={args.acc_w}")
-    check_width(args.acc_w, (1 << args.kw) - 1)
+    check_width(args.acc_w, (1 << args.kw) - 1, args.tiles, args.c_max)
 
     rng = random.Random(args.seed)
     A = [[rng.randint(INT4_MIN, INT4_MAX) for _ in range(args.n)] for _ in range(args.k)]
@@ -76,7 +95,7 @@ def main():
 
     flat = [v for row in C for v in row]
     print(f"\n# range observed: {min(flat)} .. {max(flat)}")
-    print(f"# worst case at this k_dim: +/-{accumulator_bound(args.k):,}")
+    print(f"# worst case at this k_dim: +/-{accumulator_bound(args.k, args.tiles, args.c_max):,}")
 
 
 if __name__ == "__main__":

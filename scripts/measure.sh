@@ -9,7 +9,7 @@
 # so the gate has to be here.
 #
 # Usage:
-#   scripts/measure.sh [-n N] [-p PERIOD_NS] [-u UTIL] [-t TAG] [--no-sim]
+#   scripts/measure.sh [-n N] [-c C_PORT] [-p PERIOD_NS] [-u UTIL] [-t TAG] [--no-sim]
 #
 # Env:
 #   ORFS        path to OpenROAD-flow-scripts   (default: ~/sd/OpenROAD-flow-scripts)
@@ -22,6 +22,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ORFS="${ORFS:-$HOME/sd/OpenROAD-flow-scripts}"
 
 N=4
+CPORT=1
 PERIOD=1.00
 UTIL=40
 TAG=""
@@ -30,6 +31,7 @@ RUN_SIM=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -n) N="$2"; shift 2 ;;
+    -c) CPORT="$2"; shift 2 ;;
     -p) PERIOD="$2"; shift 2 ;;
     -u) UTIL="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
@@ -38,7 +40,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-NICK="my_chip_n${N}${TAG:+_$TAG}"
+# shellcheck source=scripts/nick.sh
+source "$HERE/scripts/nick.sh"
+NICK="$(nick "$N" "$CPORT" "$TAG")"
 PERIOD_PS=$(python3 -c "print(int(round(float('$PERIOD')*1000)))")
 
 # ---------------------------------------------------------------- 1. simulate
@@ -50,7 +54,7 @@ if [[ $RUN_SIM -eq 1 ]]; then
   fi
   SIMDIR=$(mktemp -d)
   iverilog -g2005 -o "$SIMDIR/tb.vvp" \
-    -Ptb_mac_array.N="$N" \
+    -Ptb_mac_array.N="$N" -Ptb_mac_array.C_PORT="$CPORT" \
     "$HERE/tb/tb_mac_array.v" "$HERE/rtl"/*.v
   if ! vvp "$SIMDIR/tb.vvp" | tee "$SIMDIR/sim.log" | grep -q "^RESULT: PASS"; then
     echo "FATAL: regression FAILED -- refusing to produce a PPA number." >&2
@@ -81,6 +85,7 @@ done
 
 sed -e "s|@NICK@|$NICK|g" \
     -e "s|@N@|$N|g" \
+    -e "s|@C_PORT@|$CPORT|g" \
     -e "s|@UTIL@|$UTIL|g" \
     -e "s|@PERIOD_PS@|$PERIOD_PS|g" \
     -e "s|@RTL_DIR@|$HERE/rtl|g" \
@@ -129,8 +134,29 @@ if [[ $FLOW_RC -ne 0 ]]; then
   # Timing Path/*") on some OpenROAD builds. That is the image renderer, not the
   # design -- metrics are dumped before it runs. Tolerate exactly that case.
   if grep -q "GUI-0070" "$LOG" && [[ -s "$R" ]]; then
+    # GUI-0070 comes from final_outputs.tcl:58, `gui::show "source save_images.tcl"`,
+    # which asks for a display control ("Timing Path/*") this OpenROAD build does
+    # not have. Metrics are dumped before it, so they survive.
+    #
+    # BUT: ORFS's `finish` target lists 6_report.log BEFORE $(GDS_FINAL_FILE), so
+    # make aborts on that failure and the GDS rule never runs. For a long time
+    # this script called that "layout images unavailable" and moved on, while the
+    # actual consequence was that NO GDS WAS EVER PRODUCED. Recover it explicitly.
     echo "   WARNING: 6_report image rendering failed (GUI-0070); metrics are intact."
-    echo "            Layout images unavailable for this run. See $LOG"
+    echo "            Layout images unavailable. Recovering the GDS, which the"
+    echo "            aborted 'finish' target would otherwise have skipped..."
+    set +e
+    ( cd "$ORFS/flow" && make "${MAKE_ARGS[@]}" do-gds ) >> "$LOG" 2>&1
+    GDS_RC=$?
+    set -e
+    GDS="$WORK/results/nangate45/$NICK/base/6_final.gds"
+    if [[ $GDS_RC -eq 0 && -s "$GDS" ]]; then
+      echo "            GDS recovered: $(du -h "$GDS" | cut -f1)  $GDS"
+    else
+      echo "FATAL: GDS recovery failed (rc=$GDS_RC). A routed design with no GDS is" >&2
+      echo "       not a built chip; refusing to report it as one. See $LOG" >&2
+      exit 1
+    fi
   else
     echo "FLOW FAILED (rc=$FLOW_RC). Tail of $LOG:" >&2
     tail -15 "$LOG" >&2

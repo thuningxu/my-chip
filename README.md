@@ -30,7 +30,7 @@ Once ORFS exists and `openroad` runs:
 
 ```bash
 ./setup.sh          # check + install what's missing, write local.mk
-make sim            # run the regression        (9/9 must pass)
+make sim            # run the regression       (22/22 must pass)
 make measure        # sim-gated synth + P&R, prints one QoR row
 make path           # why the clock is what it is
 ```
@@ -64,7 +64,7 @@ my-chip/
 ├── Makefile             # sim / measure / sweep / clean targets
 ├── local.mk             # generated, gitignored, machine-specific tool paths
 ├── rtl/mac_array.v      # v0 baseline: parameterised N x N INT4 outer-product MAC
-├── tb/tb_mac_array.v    # self-checking regression, 9 cases, PASS at N=4/8/16
+├── tb/tb_mac_array.v    # self-checking regression, 22 cases, PASS at N=4/8/16
 ├── tb/golden.py         # independent Python reference + accumulator-width checker
 ├── flow/nangate45/
 │   ├── config.mk.in     # ORFS config TEMPLATE -- the single definition
@@ -102,8 +102,20 @@ entries.
 ## What the design computes
 
 ```
-C[i][j] = sum over k of  A[k][i] * B[k][j]     for k in [0, k_dim)
+D[i][j] = init[i][j] + sum over k of  A[k][i] * B[k][j]    for k in [0, k_dim)
 ```
+
+`init` is selected by `init_mode`: `INIT_ZERO` (D = A@B), `INIT_C`
+(D = A@B + C, C supplied on `c_in`), or `INIT_KEEP` (D = A@B + D_prev, which
+chains k-tiles with no reset). **Feed A column-major and this is a matrix
+product** — `sum_k A[i][k]*B[k][j]`. There is no transpose hardware; the layout
+requirement is on whoever fills the memories. Verified against a textbook triple
+loop in tb cases M1/M2.
+
+Measured cost of the addend (yosys generic synth, N=4, total cells): chaining is
+free (4937 -> 4935), external C costs +381 cells and is entirely the data mux
+(one ACC_W-wide 2:1 mux per accumulator). Build with `C_PORT=0` to drop it.
+
 
 `A[k]` and `B[k]` are each `N` signed INT4 lanes packed into one memory word.
 The block masters two read ports and one write port; results drain as `N*N`
@@ -126,6 +138,7 @@ prior project of this kind:
 | T6 (restart with no reset) is permanent | `DONE` as a terminal state: first operation works, every later `start` silently ignored |
 | T5 (adversarial K) + `golden.py --acc-w` | a 12-bit accumulator claimed safe to K=64 that actually overflows at K=32 |
 | The config exists once, as a template `measure.sh` fills in | nearly every config in a comparable project hardcoded its author's home directory, unrunnable anywhere else — and a committed config nothing reads will silently drift from the one that runs |
+| `measure.sh` verifies a **GDS** exists, not just metrics | reporting PPA for a flow that never finished. ORFS lists `6_report.log` before `$(GDS_FINAL_FILE)` in `finish`, so an image-renderer crash (GUI-0070) aborts make *before* the GDS rule — for many runs this repo reported routed numbers for a design it had never actually built |
 | SDC always sets `set_clock_uncertainty` | omitting it flatters every reported frequency by ~10% |
 | `EXPERIMENTS.md` has a `Stage` column | an ABC mapping objective (900 MHz) tabulated next to routed slack as if comparable |
 | Baseline measured in *this* flow | speedups quoted against an external number that was never reproduced |

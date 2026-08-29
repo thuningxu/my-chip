@@ -52,10 +52,18 @@ which is a routine source of inflated headline numbers.
 
 ## Results
 
+Row ids use two prefixes. **`v`** rows are the performance experiments from the
+plan below — each trades cycles for clock. **`f`** rows add a *capability* and
+report what it cost; they are not attempts to go faster, and a small fmax loss in
+an `f` row is a price, not a regression.
+
+
 | # | Design | N | Stage | Period | Setup WS | Implied fmax | DRC | Hold WS | Cycles @K=1024 | stdcells | flip-flops | area µm² | power W | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | v0 | `mac_array` baseline | 4 | routed | 1.00 ns | **−0.2776** | **783 MHz** | **0** | +0.0021 | 1043 (sim) | 7,979 | 455 | 12,817 | 0.082 | naive: mult + 24-bit add in one cycle. Setup NOT met, TNS −51.6. Die 156×156 µm, 55% util. |
 | v0 | `mac_array` baseline | 16 | routed | 1.00 ns | **−0.3373** | **748 MHz** | **0** | −0.0071 | 1283 (sim) | 114,047 | 6,223 | 167,983 | 1.130 | same RTL, N=16. Setup NOT met, TNS −742. **Hold now slightly violating.** Die 581×581 µm, 50% util. |
+| f1a | `mac_array` + INIT_KEEP (`C_PORT=0`) | 4 | routed | 1.00 ns | **−0.2854** | **778 MHz** | **0** | +0.0013 | 1043 (sim) | 7,988 | 455 | 12,619 | 0.078 | `D = A@B + D_prev`. Chaining k-tiles by NOT clearing the accumulator; external-C hardware pruned. Within noise of v0 (+9 stdcells, −5 MHz, −1.5% area). TNS −54.2. |
+| f1b | `mac_array` + INIT_C (`C_PORT=1`) | 4 | routed | 1.00 ns | **−0.3223** | **756 MHz** | **0** | +0.0004 | 1043 (sim) | 9,158 | 455 | 13,663 | 0.070 | adds arbitrary external `C` on a 384-bit port. **+1,170 stdcells, +1,044 µm², −22 MHz vs f1a.** TNS −57.2. |
 
 ### v0 findings
 
@@ -140,3 +148,90 @@ So expect v1–v3 to work at N=4 and then to plateau with nothing left to climb.
 The point of v5 is to grow N until the other two effects appear. Do not conclude
 "the design is optimal" from a plateau at N=4 — conclude that N=4 is too small
 to be interesting, and scale up.
+
+### f1 findings — the +C addend
+
+`D[i][j] = init[i][j] + sum_k A[k][i]*B[k][j]`, with `init` selected by
+`init_mode`: `INIT_ZERO`, `INIT_C` (external `c_in`), or `INIT_KEEP` (hold, so
+`D = A@B + D_prev`). Two rows because they are two separate ideas: f1a is
+chaining, f1b is an arbitrary externally-supplied addend.
+
+**Chaining is free. Arbitrary C is not.**
+
+| | stdcells | vs v0 | area µm² | fmax | flip-flops |
+|---|---|---|---|---|---|
+| v0 baseline | 7,979 | — | 12,817 | 783 MHz | 455 |
+| f1a `INIT_KEEP` | 7,988 | **+9 (+0.1%)** | 12,619 | 778 MHz | 455 |
+| f1b `+ INIT_C` | 9,158 | **+1,179 (+14.8%)** | 13,663 | 756 MHz | 455 |
+
+`INIT_KEEP` reproduces v0 to within run-to-run placement noise, which is the
+point: chaining assigns *nothing*, the flop simply holds, so no data mux appears
+on `D` and the clear-to-zero keeps riding the flop's dedicated synchronous-reset
+pin. Yosys confirms it structurally — all 384 accumulator bits stay
+`$_SDFFE_PP0P_` in both configurations.
+
+**flip-flops are identical (455) in all three rows.** The addend costs no state
+at all; the entire cost is combinational. That is the check that the accumulator
+count was not perturbed.
+
+**GENERIC SYNTH UNDERSTATED THE REAL COST BY 3×.** Yosys `synth` at N=4 put
+`C_PORT=1` at +381 cells over `C_PORT=0`; the routed flow measured **+1,170**.
+The generic number counts the 384 ACC_W-wide 2:1 muxes and nothing else. The
+real flow additionally buffers a 384-bit `c_in` net fanning out across the die,
+and that buffering is the missing two-thirds. Treat pre-techmap cell deltas as a
+*lower bound* on area cost, never an estimate — this is the second time in this
+project a coarse-cell count has failed to predict a physical one.
+
+**Do not trust the power column here.** f1b reports *less* power (0.070 W) than
+f1a (0.078 W) despite 15% more cells. `c_in` is an undriven top-level input, so
+its switching activity is assumed rather than derived, and 384 extra input pins
+moved the whole placement. The delta is not credible as a power result and no
+conclusion is drawn from it.
+
+**RTL shape mattered more than RTL content.** Writing the three init modes as a
+*nested* conditional inside one `if (state == S_IDLE && start)` cost **+1,168**
+generic cells; writing the identical logic as a *flat* `if / else if` chain cost
+**+381**. Same function, 3.1× the area, because only the flat form lets yosys
+recognise the leading constant-zero branch as a synchronous reset. The RTL now
+carries a comment saying not to "tidy" it.
+
+Cycle counts are unchanged (1043 at K=1024, identical to v0): the addend adds no
+cycles. `INIT_C` needs all `N²·ACC_W` bits of `c_in` on the single `start` edge,
+because all N² accumulators load simultaneously — it cannot be streamed in on a
+narrow port without adding a preload state.
+
+### Note on GDS (applies to every row above)
+
+Until this was found, **no row in this table had a GDS behind it.** ORFS's
+`finish` target is
+
+```make
+finish: $(LOG_DIR)/6_report.log $(RESULTS_DIR)/6_final.v \
+        $(RESULTS_DIR)/6_final.sdc $(GDS_FINAL_FILE)
+```
+
+and `6_report` fails on this OpenROAD build at `final_outputs.tcl:58`,
+`gui::show "source save_images.tcl"`, which asks for a display control
+(`Timing Path/*`) the build does not have. Metrics are dumped *before* that call,
+so they were always valid — but make aborts on the first failed prerequisite, so
+`$(GDS_FINAL_FILE)` was never built. `measure.sh` called this "layout images
+unavailable" and moved on.
+
+`measure.sh` now recovers the GDS with `do-gds` and **fails the run if it cannot**:
+a routed design with no GDS is not a built chip. Verified output:
+
+| config | row | GDS | top cell | die | cell defs |
+|---|---|---|---|---|---|
+| `my_chip_n4`    | v0  | 5.7 MB | `mac_array` | 155.8 × 155.8 µm | 103 |
+| `my_chip_n4_c0` | f1a | 5.7 MB | `mac_array` | 155.5 × 155.5 µm | 100 |
+| `my_chip_n4_c1` | f1b | 6.6 MB | `mac_array` | 160.2 × 160.2 µm |  99 |
+
+Every one is verified rather than merely present: `scripts/gds.sh` reads the
+stream back, asserts the top cell is `mac_array` with a non-empty bounding box,
+and requires KLayout to have reported both "All LEF cells have matching GDS/OAS
+cells" and "No orphan cells in the final layout". A wrong or truncated stream
+still produces a plausibly-sized file, so existence is not correctness.
+
+`make gds` builds one for an already-routed config straight from `6_final.def`,
+without re-running synthesis, placement or routing — which is how the v0 row got
+its layout without rebuilding the pre-addend RTL.

@@ -2,8 +2,37 @@
 //=============================================================================
 // mac_array -- v0 BASELINE. Parameterised N x N signed INT4 outer-product MAC.
 //
-// Computes  C[i][j] = sum over k of  A[k][i] * B[k][j]   for k in [0, k_dim)
-// where A[k] and B[k] are each N signed INT4 lanes packed into one memory word.
+// Computes  D[i][j] = init[i][j] + sum over k of  A[k][i] * B[k][j]
+//                     for k in [0, k_dim)
+// where A[k] and B[k] are each N signed INT4 lanes packed into one memory word,
+// and `init` is chosen by init_mode:
+//
+//   INIT_ZERO   init = 0        D = A@B          (bit-identical to the v0 design)
+//   INIT_C      init = c_in     D = A@B + C      C supplied externally
+//   INIT_KEEP   init = D_prev   D = A@B + D_prev chains k-tiles, no reset needed
+//
+// FEED A COLUMN-MAJOR AND THIS IS A MATRIX PRODUCT. With memory word k holding
+// column k of A (lane i = A[i][k]) and word k of B holding row k of B, the sum
+// above is sum_k A[i][k]*B[k][j] = (A@B)[i][j]. No transpose hardware exists or
+// is needed; the layout requirement is on whoever fills the memories. Verified
+// against an independent triple loop -- see tb case M1.
+//
+// COST OF THE ADDEND, measured (yosys generic synth, total cells, N=4):
+//
+//   config                              cells   accumulator flop   $_MUX_
+//   v0, no addend ports at all           4937   384 $_SDFFE_           35
+//   INIT_ZERO + INIT_KEEP  (C_PORT=0)    4935   384 $_SDFFE_           38
+//   + INIT_C               (C_PORT=1)    5318   384 $_SDFFE_          421
+//
+// Chaining is FREE (-2 cells; abc just found a marginally better factoring).
+// INIT_KEEP assigns nothing at all -- the flop holds -- so no data mux appears
+// and the clear-to-zero keeps riding the flop's dedicated synchronous-reset pin.
+//
+// External C costs +381 cells, and that is ENTIRELY the data mux: +386 $_MUX_,
+// i.e. one ACC_W-wide 2:1 mux per accumulator (N*N*ACC_W = 384 at N=4). Note
+// the sync-reset pin SURVIVES -- see the comment on the flat if/else-if chain
+// in the array below, which is what makes that true. Set C_PORT=0 to get the
+// 381 cells back if you only ever chain.
 //
 // This is deliberately the SIMPLEST CORRECT design, not a fast one. It exists
 // to be the baseline you climb away from. Known costs, left in on purpose:
@@ -27,12 +56,17 @@
 // N must be a power of two.
 //=============================================================================
 module mac_array #(
-    parameter integer N     = 4,   // array is N x N; N*N outputs
-    parameter integer KW    = 16,  // width of k_dim
-    parameter integer ACC_W = 24,  // accumulator width
+    parameter integer N      = 4,  // array is N x N; N*N outputs
+    parameter integer KW     = 16, // width of k_dim
+    parameter integer ACC_W  = 24, // accumulator width
+    // 1 = build the external-C preload path, so INIT_C works.
+    // 0 = prune it. c_in is ignored, its N*N ACC_W-wide muxes disappear, and
+    //     the clear goes back to riding the flop's free sync-reset pin. Driving
+    //     INIT_C with C_PORT=0 is a design error and is caught below.
+    parameter integer C_PORT = 1,
     // derived -- do not override
-    parameter integer RAW   = $clog2(N),
-    parameter integer OAW   = $clog2(N*N)
+    parameter integer RAW    = $clog2(N),
+    parameter integer OAW    = $clog2(N*N)
 )(
     input  wire                         clk,
     input  wire                         rst_n,
@@ -40,6 +74,16 @@ module mac_array #(
     // control
     input  wire                         start,
     input  wire [KW-1:0]                k_dim,
+
+    // What the accumulators start from. Unlike k_dim (which must be held for the
+    // whole operation because it is read live), init_mode and c_in are sampled
+    // ONLY on the `start` edge and may change freely afterwards.
+    input  wire [1:0]                   init_mode,
+    // Row-major N x N tile of ACC_W-bit two's-complement addends: element [i][j]
+    // occupies bit (i*N + j)*ACC_W, matching out_addr = {drow, dcol}. Ignored
+    // unless init_mode == INIT_C.
+    input  wire [N*N*ACC_W-1:0]         c_in,
+
     output reg                          busy,
     output reg                          done,
 
@@ -69,6 +113,13 @@ module mac_array #(
     localparam [1:0] S_IDLE  = 2'd0,
                      S_RUN   = 2'd1,
                      S_DRAIN = 2'd2;
+
+    // init_mode encoding. INIT_ZERO is 0 so that tying the port low reproduces
+    // the pre-addend design exactly -- which is what lets the original nine
+    // regression cases stand unchanged as the backward-compatibility proof.
+    localparam [1:0] INIT_ZERO = 2'd0,
+                     INIT_C    = 2'd1,
+                     INIT_KEEP = 2'd2;
 
     reg [1:0]           state;
     reg [KW-1:0]        issued;    // reads launched
@@ -181,9 +232,31 @@ module mac_array #(
                 wire signed [3:0] w_lane = wgt_rdata[gc*4 +: 4];
                 wire signed [7:0] product = a_lane * w_lane;
 
+                // WRITE THIS AS A FLAT if/else-if CHAIN, NOT NESTED. Yosys's
+                // flop inference is shape-sensitive: a leading branch whose
+                // condition maps straight to a constant 0 becomes the flop's
+                // dedicated synchronous-reset pin and costs nothing. Nesting the
+                // three init modes inside one `if (state==S_IDLE && start)`
+                // builds a data mux on D instead and forfeits that pin. Both
+                // forms, yosys `synth -top mac_array` at N=4 C_PORT=1:
+                //
+                //   form     cells   vs v0's 4937   accumulator flop
+                //   flat      5318   +381           384 $_SDFFE_PP0P_
+                //   nested    6107   +1170          384 $_DFFE_PP_   <- no reset
+                //
+                // Identical logic, and nesting costs 3.1x as much for it: losing
+                // the reset pin alone adds 1094 $_NAND_. Measured, not guessed --
+                // do not "tidy" this.
+                //
+                // INIT_KEEP appears in no branch on purpose: falling through
+                // every condition leaves the flop holding, which is why chaining
+                // is nearly free.
                 always @(posedge clk) begin
-                    if (state == S_IDLE && start)
+                    if (state == S_IDLE && start && init_mode == INIT_ZERO)
                         acc[gr][gc] <= {ACC_W{1'b0}};
+                    else if (C_PORT != 0 && state == S_IDLE && start
+                                         && init_mode == INIT_C)
+                        acc[gr][gc] <= c_in[(gr*N + gc)*ACC_W +: ACC_W];
                     else if (state == S_RUN && rd_valid)
                         acc[gr][gc] <= acc[gr][gc]
                                      + {{(ACC_W-8){product[7]}}, product};
@@ -202,5 +275,29 @@ module mac_array #(
             $display("WARNING: ACC_W=%0d may overflow for KW=%0d (need >= %0d)",
                      ACC_W, KW, 8 + KW);
         end
+        if (C_PORT != 0 && C_PORT != 1) begin
+            $display("FATAL: C_PORT must be 0 or 1 (got %0d)", C_PORT);
+            $finish;
+        end
     end
+
+    // ---- runtime check: INIT_C without the hardware to serve it ------------
+    // With C_PORT=0 the c_in path does not exist, so an INIT_C request matches
+    // no branch above and the accumulator simply holds -- it silently behaves
+    // like INIT_KEEP and returns a plausible wrong answer. That is exactly the
+    // failure class this repo exists to prevent, so say so out loud.
+    //
+    // `ifndef YOSYS is load-bearing. Yosys defines YOSYS automatically, and
+    // WITHOUT this guard it lowered the $display into a $print cell that
+    // survived into the netlist (measured: 1 $print at N=4) -- a formal-only
+    // cell with no standard-cell mapping, which would reach ORFS. Icarus does
+    // not define YOSYS, so the check stays live in simulation, where it belongs.
+`ifndef YOSYS
+    always @(posedge clk) begin
+        if (rst_n && C_PORT == 0 && state == S_IDLE && start
+                  && init_mode == INIT_C)
+            $display("FATAL: t=%0t init_mode=INIT_C but C_PORT=0 -- c_in is not built; accumulators HOLD instead of loading C.",
+                     $time);
+    end
+`endif
 endmodule
