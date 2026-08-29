@@ -212,3 +212,31 @@ is as corrosive as a false success. The check is now tolerant —
 `max(32, 1% of expected)` — because the failure it exists to catch is "the
 parameter had no effect", which is by construction a large fraction (the real bug
 was 15.8% off), not a handful of control bits.
+
+### Calibration: FLW-0009 is optimistic on a large die, by about the size of the effect
+
+X1 declared `FLW-0009` as the report to read for slack, cross-validated on
+`mac_array` f2b where it matched the routed value to 0.001 ns. On this design it
+does not:
+
+| design | die | FLW-0009 | final routed | shift |
+|---|---|---|---|---|
+| `mac_array` f2b | 156 µm | −0.2590 | −0.2581 | **+0.0009** |
+| `amx` a1 | 1555 µm | −1.7850 | −1.8171 | **−0.0321** |
+| `amx` X1-Y0 | 1554 µm | −0.0240 | −0.0565 | **−0.0325** |
+
+Consistently **~−0.032 ns on the 1.55 mm die and ~0 on the 156 µm one**. That is
+detailed routing adding wire delay which global-route parasitics underestimated,
+and it scales with distance. So FLW-0009 remains the right thing to read *during*
+a run — it is the design's worst path, unlike an optimizer's progress table — but
+it is not the final number on a die this size.
+
+**The uncomfortable part:** 0.032 ns is the same order as the entire Y0→Y1
+improvement seen at global route (0.042 ns). The correction is as large as the
+effect being measured. At this die size a few MHz is below the flow's own
+stage-to-stage resolution, which independently justifies `FLAT_MHZ = 10` in
+`trials.py` — a threshold picked earlier from the f2a/f2b attribution noise, now
+supported by a second, unrelated measurement.
+
+Practical consequence for reading the X1 row: only a **large** Y step means
+anything. A 5 MHz move is not a result.
