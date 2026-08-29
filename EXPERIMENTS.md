@@ -379,6 +379,31 @@ mixed-sign case happens to be period-2 in `b` so its four-byte sum is invariant
 under reversal. Four mutations, three caught in both modes, one correctly dead at
 `SAT=0`; the table is in [tb/README.md](tb/README.md).
 
+### Synthesis: the tile registers are all there, exactly
+
+Mapped to Nangate45 at `SAT=1`, counted from `1_2_yosys.v`:
+
+| | count | |
+|---|---|---|
+| total stdcells | **407,034** | 3.6× the largest design this flow had routed (114,047) |
+| flip-flops | **24,584** | = 24,576 + 8 — see below |
+| `DFF_X1` alone | **24,576** | `3 tiles × 16 rows × 512 bits`, to the bit |
+| full/half adders | 151,064 | 119,568 `FA_X1` + 31,496 `HA_X1` |
+| `MUX2_X1` | 46,116 | the 16:1 row/dword selects, plus the fold muxes |
+| buf/inv | 41,706 | |
+
+**The flip-flop count is an exact structural check, not an approximation.**
+24,576 is the three tile registers to the bit, and the remaining 8 are precisely
+the control state: `state` (2) + `kcnt` (4) + `busy` (1) + `done` (1). Nothing was
+optimised away and no tile silently collapsed — the same class of check as v0's
+flip-flop count tracking `N²·ACC_W + control`.
+
+Worth noting against the estimate: this was **planned at ~574k cells and came in
+at 407k, 29% below**. The multiplier estimate (1024 × 407 gates ≈ 417k) was
+essentially the whole design; the adder trees and accumulates that were budgeted
+separately mostly disappeared into shared logic that abc found. An over-estimate
+in the safe direction, but an estimate all the same.
+
 ### Saturation is a deviation, and it is parameterised for that reason
 
 Intel's `DPBD` is plain modular INT32 — `c := c + p0+p1+p2+p3`, no clamp. `SAT=1`

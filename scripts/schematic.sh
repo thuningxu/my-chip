@@ -42,16 +42,22 @@
 # graph is not a schematic. It is hand-drawn from the case statement, and
 # guarded by yosys fsm_extract reporting the same state count.
 #
-# Only mac_array is drawn here. amx_tdpbssd has 1024 multipliers and 24,576 flops;
-# there is no cut of it that is a readable page, and its interesting property (the
-# VNNI byte pairing) is a LAYOUT contract, not a topology -- a schematic would
-# show 1024 identical multipliers and tell you nothing about it.
+# BOTH designs are drawn, with different strategies. mac_array is small enough
+# that the views cut the whole array. amx_tdpbssd is not -- 1024 multipliers and
+# 24,584 flops -- so its views show the UNIT it repeats (one DPBD), which is also
+# where its one silent failure mode lives: which byte of A's dword meets which
+# byte of B's dword.
+#
+# OUTPUT IS PER-CONFIGURATION. build/schematic/<nick>/, using the same nickname
+# the measured artifacts use, so a figure set matches an EXPERIMENTS.md row. It
+# was a single flat directory, which meant every run silently overwrote the last.
 #
 # Layout images are NOT produced here. ORFS already writes them during
 # `make measure` to work/reports/nangate45/<nick>/base/final_*.webp. A layout
 # is not a schematic and this script does not blur the two.
 #
-# Usage:  scripts/schematic.sh [-n N] [-c C_PORT] [-r OUT_PAR] [-o OUTDIR]
+# Usage:  scripts/schematic.sh [-d DESIGN] [-n N] [-c C_PORT] [-r OUT_PAR]
+#                             [-s SAT] [-o OUTDIR]
 #
 # -c selects the same C_PORT the RTL is built with. View 08 (the accumulator
 # init path, i.e. where D = A@B + C happens) does not exist at C_PORT=0 and is
@@ -67,17 +73,21 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+DESIGN=mac_array
 N=2
 CPORT=1
 OUTPAR=0
-OUT="$HERE/build/schematic"
+SAT=1
+OUT=""
 YOSYS="${YOSYS_EXE:-yosys}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -d) DESIGN="$2"; shift 2 ;;
     -n) N="$2"; shift 2 ;;
     -c) CPORT="$2"; shift 2 ;;
     -r) OUTPAR="$2"; shift 2 ;;
+    -s) SAT="$2"; shift 2 ;;
     -o) OUT="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -88,7 +98,40 @@ command -v "$YOSYS" >/dev/null \
 command -v netlistsvg >/dev/null \
   || { echo "FATAL: netlistsvg not found.  npm i -g netlistsvg" >&2; exit 1; }
 
-RTL="$HERE/rtl/mac_array.v"
+# shellcheck source=scripts/nick.sh
+source "$HERE/scripts/nick.sh"
+
+# Per-design: which RTL, which top, and the chparam string that configures it.
+# The shared machinery below (caption/view/the three guards) is design-agnostic
+# and reads these.
+case "$DESIGN" in
+  mac_array)
+    RTL="$HERE/rtl/mac_array.v"
+    TOPMOD=mac_array
+    CHPARAM="-set N $N -set C_PORT $CPORT -set OUT_PAR $OUTPAR"
+    CFG_DESC="N=$N C_PORT=$CPORT OUT_PAR=$OUTPAR"
+    NICK="$(nick "$N" "$CPORT" "" "$OUTPAR")"
+    ;;
+  amx_tdpbssd)
+    RTL="$HERE/rtl/amx_tdpbssd.v"
+    TOPMOD=amx_tdpbssd
+    CHPARAM="-set SAT $SAT"
+    CFG_DESC="SAT=$SAT"
+    NICK="$(nick_amx "$SAT")"
+    ;;
+  *)
+    echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd" >&2
+    exit 2 ;;
+esac
+
+# OUTPUT GOES IN A CONFIG-SPECIFIC DIRECTORY, reusing the same nickname the
+# measured artifacts use, so a schematic set can be matched to an EXPERIMENTS.md
+# row. It used to be a single build/schematic/, which meant every run silently
+# overwrote the previous one -- a C_PORT=0 set replacing a C_PORT=1 set, or SN=4
+# replacing SN=2, with only the caption to tell you it had happened. Captions are
+# still there, but a caption is a mitigation and a distinct path is a fix.
+OUT="${OUT:-$HERE/build/schematic/$NICK}"
+
 NN=$((N*N))
 mkdir -p "$OUT"
 
@@ -102,20 +145,8 @@ anchor() {
   echo "$n"
 }
 
-L_REQ=$(anchor 'act_req  *= \(state')
-L_K0=$(anchor 'k_dim == \{KW\{1.b0\}\}\) \? S_DRAIN')
-L_ISS=$(anchor 'issued <= issued \+')
-L_CON=$(anchor 'consumed <= consumed \+')
-L_EQK=$(anchor 'consumed \+ 1.b1 == k_dim')
-L_DRN=$(anchor 'out_wdata <= acc\[drow\]\[dcol\]')
-L_ROW=$(anchor 'drow <= drow \+')
-L_COL=$(anchor 'dcol <= dcol \+')
-L_MUL=$(anchor 'product = a_lane \* w_lane')
-L_ACC=$(anchor 'acc\[gr\]\[gc\] <= acc\[gr\]\[gc\]')
 
-c() { local l; for l in "$@"; do printf 'c:*mac_array.v:%s* ' "$l"; done; }
-
-echo "== schematics for N=$N C_PORT=$CPORT OUT_PAR=$OUTPAR into $OUT =="
+echo "== schematics: $DESIGN ($CFG_DESC) -> $OUT =="
 
 # ------------------------------------------------------------------ caption
 # An uncaptioned schematic is indistinguishable from a schematic of a
@@ -159,8 +190,8 @@ view() {
   local mod="${name#??_}"
   cat > "$OUT/$name.ys" <<EOF
 read_verilog $RTL
-chparam -set N $N -set C_PORT $CPORT -set OUT_PAR $OUTPAR mac_array
-prep -top mac_array
+chparam $CHPARAM $TOPMOD
+prep -top $TOPMOD
 select -set v $*
 submod -name $mod @v
 hierarchy -top $mod
@@ -199,7 +230,7 @@ PY
   # C_PORT changes what hardware exists, and every view shares one output
   # directory, so the configuration has to be on the face of each drawing --
   # otherwise a C_PORT=0 run silently overwrites a C_PORT=1 set.
-  caption "$OUT/$name.svg" "$title" "N=$N C_PORT=$CPORT OUT_PAR=$OUTPAR | $sub"
+  caption "$OUT/$name.svg" "$title" "$DESIGN $CFG_DESC | $sub"
 
   # GUARD 3: caption() rewrites the SVG header by hand. Prove the result still
   # parses, still has the caption, and still has the netlist body under it.
@@ -220,6 +251,24 @@ PY
   printf '   %-26s %s\n' "$name.svg" "$shape"
 }
 
+
+# ============================== mac_array views ==============================
+# Anchors live INSIDE the function: anchor() aborts when a pattern is missing,
+# and every pattern here is mac_array-specific, so running them for another
+# design would kill the script rather than skip the views.
+views_mac_array() {
+L_REQ=$(anchor 'act_req  *= \(state')
+L_K0=$(anchor 'k_dim == \{KW\{1.b0\}\}\) \? S_DRAIN')
+L_ISS=$(anchor 'issued <= issued \+')
+L_CON=$(anchor 'consumed <= consumed \+')
+L_EQK=$(anchor 'consumed \+ 1.b1 == k_dim')
+L_DRN=$(anchor 'out_wdata <= acc\[drow\]\[dcol\]')
+L_ROW=$(anchor 'drow <= drow \+')
+L_COL=$(anchor 'dcol <= dcol \+')
+L_MUL=$(anchor 'product = a_lane \* w_lane')
+L_ACC=$(anchor 'acc\[gr\]\[gc\] <= acc\[gr\]\[gc\]')
+
+c() { local l; for l in "$@"; do printf 'c:*mac_array.v:%s* ' "$l"; done; }
 # ---- 1. one MAC cell -- the circuit the entire chip repeats N*N times ------
 view 01_mac_cell \
   "One multiply-accumulate cell -- the chip repeats this $NN times" \
@@ -461,3 +510,112 @@ echo
 echo "Netlist views: N=$N, coarse cells BEFORE technology mapping. Same"
 echo "architecture as N=4, but NOT the mapped netlist and NOT a layout."
 echo "Layout: work/reports/nangate45/*/base/final_*.webp, from 'make measure'."
+
+}
+
+# ============================= amx_tdpbssd views =============================
+# The array itself is not drawable -- 1024 identical multipliers. But the UNIT it
+# repeats is, and that unit is where the instruction's one silent failure mode
+# lives: which byte of A's dword meets which byte of B's dword. So the figures
+# here are one DPBD, the saturating fold, the control FSM, and one multiplier at
+# gate level. No anchors: this design's cells are named by hierarchy path
+# (g_m[0].g_n[0].sum4), which is stabler than a line number and needs no grep.
+views_amx_tdpbssd() {
+
+  # ---- 1. one DPBD -- the unit the instruction repeats 256 times ------------
+  # 4 INT8 products -> adder tree -> 32-bit accumulate -> the fold. This is the
+  # figure that shows the BYTE PAIRING: byte b of A's dword k multiplied by byte
+  # b of B's dword n, four of them summed. Get that wrong and the instruction
+  # transposes silently.
+  #
+  # Cell count differs by SAT, and the difference IS the saturation cost:
+  #   SAT=1  12 cells   mul=4 add=4 mux=3 xor=1
+  #   SAT=0  10 cells   mul=4 add=4 mux=2        <- no xor: ovf is pruned
+  #
+  # The accumulator flop is NOT in this cut. %co stops before it because all 256
+  # accumulators share one mem2reg read structure, and forcing it in would drag
+  # in all of them. Said here rather than pretended away.
+  view 01_dpbd \
+    "One DPBD unit -- 4 INT8 products, adder tree, INT32 accumulate" \
+    "select prod* %ci1 %co7. The unit repeated 256x. Accumulator flop is OUTSIDE this cut." \
+    '$mul,$add' \
+    'w:g_m[0].g_n[0].prod* %ci1 %co7'
+
+  # exactly four multipliers, or this is not one DPBD
+  python3 - "$OUT/01_dpbd.json" <<'PY' || exit 1
+import collections, json, sys
+d = json.load(open(sys.argv[1]))
+h = collections.Counter(c['type'] for m in d['modules'].values()
+                        for c in m['cells'].values())
+if h['$mul'] != 4:
+    sys.exit("FATAL: 01_dpbd holds %d multipliers, expected exactly 4 -- a DPBD "
+             "is four byte products by definition. Got: %s" % (h['$mul'], dict(h)))
+PY
+
+  # ---- 2. the saturating fold -- the deviation from Intel -------------------
+  # Intel's DPBD wraps. This is the hardware that does not. 33-bit add, the
+  # ovf = raw[32]^raw[31] detect, the rail select, the fold mux. It does not
+  # exist at SAT=0, which is the point of showing it separately.
+  if [[ "$SAT" != "0" ]]; then
+    view 02_saturate \
+      "The saturating fold -- INT32 clamp, a DELIBERATE deviation from Intel" \
+      "select raw %ci1 %co3. ovf = raw[32]^raw[31]; the rail is chosen by raw[32]." \
+      '$xor,$mux' \
+      'w:g_m[0].g_n[0].raw %ci1 %co3'
+  else
+    printf '   %-26s %s\n' "02_saturate.svg" \
+      "SKIPPED -- SAT=0 wraps (bit-exact Intel); there is no fold hardware"
+  fi
+
+  # ---- 3. control ----------------------------------------------------------
+  # Two states and a 4-bit k counter. Contrast mac_array, which needs two KW-bit
+  # counters and three comparators: this instruction has a FIXED trip count, so
+  # the control is almost nothing.
+  view 03_control \
+    "Control -- 2 states, one 4-bit k counter, 16 fixed steps" \
+    "select t:\$adff %ci3. A fixed trip count needs no comparator against a runtime bound." \
+    '$adff' \
+    't:$adff %ci3'
+
+  # ---- 4. one INT8 multiplier at gate level --------------------------------
+  # The bridge to the textbook, and the scale of the thing: mac_array's 4x4
+  # signed multiplier is 84 gates, this 8x8 is 407 -- ~5x for 2x the width.
+  # Deliberately NOT run through abc, same reason as mac_array's view 06:
+  # techmap's structural output still resembles an array multiplier.
+  cat > "$OUT/04_multiplier_gates.ys" <<EOF
+read_verilog $RTL
+chparam $CHPARAM $TOPMOD
+prep -top $TOPMOD
+select -set m w:g_m[0].g_n[0].prod[0] %ci1
+submod -name mult8x8 @m
+hierarchy -top mult8x8
+techmap
+opt -fast
+opt_clean
+write_json $OUT/04_multiplier_gates.json
+EOF
+  "$YOSYS" -q -s "$OUT/04_multiplier_gates.ys" 2>"$OUT/04_multiplier_gates.yslog" \
+    || { echo "FATAL: yosys failed for 04_multiplier_gates -- see the yslog" >&2; exit 1; }
+  netlistsvg "$OUT/04_multiplier_gates.json" -o "$OUT/04_multiplier_gates.svg" \
+    >/dev/null 2>&1 || { echo "FATAL: netlistsvg failed for 04_multiplier_gates" >&2; exit 1; }
+  MG=$(python3 -c "import json; d=json.load(open('$OUT/04_multiplier_gates.json')); \
+print(sum(len(m['cells']) for m in d['modules'].values()))")
+  caption "$OUT/04_multiplier_gates.svg" \
+    "One 8x8 signed INT8 multiplier, decomposed to $MG logic gates" \
+    "$DESIGN $CFG_DESC | ONE of the 1024. mac_array's 4x4 is 84 gates; 2x the width costs ~5x."
+  printf '   %-26s %s\n' "04_multiplier_gates.svg" "$MG 2-input gates"
+
+  echo
+  echo "Read them in this order:"
+  echo "   03_control            2 states, a 4-bit counter -- 16 fixed steps"
+  echo "   01_dpbd               the unit repeated 256x, and the BYTE PAIRING"
+  echo "   02_saturate           the INT32 clamp (absent at SAT=0)"
+  echo "   04_multiplier_gates   real gates -- the bridge to the textbook"
+  echo
+  echo "Coarse cells BEFORE technology mapping. The full design is 407,034"
+  echo "stdcells and 24,584 flops; no cut of the whole array is a readable page,"
+  echo "which is why these show the repeated UNIT instead."
+}
+
+# ============================== dispatch =====================================
+views_"$DESIGN"

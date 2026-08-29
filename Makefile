@@ -62,7 +62,8 @@ help:
 	@echo "  make golden          run the Python reference model"
 	@echo ""
 	@echo "  make schematic       readable circuit schematics   (SN=$(SN))"
-	@echo "                       coarse cells, pre-techmap -- $(BUILD)/schematic/"
+	@echo "                       coarse cells, pre-techmap. Per-config output:"
+	@echo "                       $(BUILD)/schematic/<nick>/"
 	@echo ""
 	@echo "  make measure         sim-gated synth+P&R, print a QoR row"
 	@echo "                       (DESIGN=$(DESIGN) N=$(N) CPORT=$(CPORT) OUTPAR=$(OUTPAR)"
@@ -162,7 +163,8 @@ golden:
 # what it computes, so they are useful even while the design is broken.
 .PHONY: schematic
 schematic:
-	@YOSYS_EXE="$(YOSYS_EXE)" ./scripts/schematic.sh -n $(SN) -c $(CPORT) -r $(OUTPAR)
+	@YOSYS_EXE="$(YOSYS_EXE)" ./scripts/schematic.sh -d $(DESIGN) -n $(SN) -c $(CPORT) \
+	     -r $(OUTPAR) -s $(SAT)
 
 #-----------------------------------------------------------------------------
 # Physical flow. measure.sh re-runs the regression itself and refuses to

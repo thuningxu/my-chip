@@ -55,6 +55,46 @@ slot. The distinct `amx_` prefix also guarantees no collision with the
 design has no legacy names to preserve, and *which saturation mode* is exactly
 what you want visible on the directory.
 
+## schematic.sh
+
+```bash
+make schematic                          # mac_array at N=2 -> build/schematic/my_chip_n2_c1/
+make schematic SN=4 CPORT=0             # a different config, a DIFFERENT directory
+make schematic DESIGN=amx_tdpbssd       # -> build/schematic/amx_s1/
+make schematic DESIGN=amx_tdpbssd SAT=0
+```
+
+**Output is per-configuration**, under the same nickname the measured artifacts
+use, so a figure set can be matched to an `EXPERIMENTS.md` row. It used to be one
+flat `build/schematic/`, which meant every run silently overwrote the previous
+one — a `C_PORT=0` set replacing a `C_PORT=1` set, with only the caption to say
+it had happened. The captions are still there; a caption is a mitigation and a
+distinct path is the fix.
+
+The two designs are drawn with different strategies, because they are different
+sizes:
+
+| design | figures | strategy |
+|---|---|---|
+| `mac_array` | 8 | cut the **whole array** — it is 88 coarse cells at N=2 |
+| `amx_tdpbssd` | 4 | cut the **repeated unit** — the whole thing is 407k stdcells |
+
+For AMX the unit is one DPBD, which is also where the instruction's one silent
+failure mode lives: which byte of A's dword meets which byte of B's dword. The
+figure shows both operands split into `0:7 / 8:15 / 16:23 / 24:31` feeding four
+multipliers, so the pairing is *visible* rather than asserted.
+
+`01_dpbd` also makes the saturation cost visible: 12 cells at `SAT=1`, 10 at
+`SAT=0`, the difference being the overflow XOR and the rail mux. `02_saturate` is
+skipped entirely at `SAT=0` — the hardware does not exist there, and its absence
+is the point.
+
+Three guards, because both failure modes are silent: a yosys `select` matching
+nothing falls back to the whole module (every view greps its own log for "did not
+match"); a view can be cut wrong and still look plausible (every view declares the
+cell types it must contain, and `02_array`/`01_dpbd` assert exact counts — N² of
+each cell type, and exactly 4 multipliers respectively).
+
 ## report_path.sh
 
 ```bash
