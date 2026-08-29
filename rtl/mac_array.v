@@ -2,20 +2,51 @@
 //=============================================================================
 // mac_array -- v0 BASELINE. Parameterised N x N signed INT4 outer-product MAC.
 //
-// Computes  D[i][j] = init[i][j] + sum over k of  A[k][i] * B[k][j]
-//                     for k in [0, k_dim)
-// where A[k] and B[k] are each N signed INT4 lanes packed into one memory word,
-// and `init` is chosen by init_mode:
+// TWO NAMES, ONE CONVENTION. Read this before the formulas: "A" is ambiguous in
+// matmul hardware, and picking the wrong reading transposes your result.
+//
+//   A, B         the MATHEMATICAL matrices, indexed [row][col] as usual.
+//   Amem, Bmem   what the memories hold, indexed [k][lane] -- literally what
+//                act_rdata and wgt_rdata deliver. One word per k, each word
+//                N signed INT4 lanes.
+//
+// The required layout is  Amem[k] = column k of A,  Bmem[k] = row k of B.
+// Equivalently Amem = A-transpose and Bmem = B: ONLY A IS STORED TRANSPOSED.
+//
+// In terms of what the ports actually see:
+//
+//   D[i][j] = init[i][j] + sum over k of  Amem[k][i] * Bmem[k][j]
+//                          for k in [0, k_dim)
+//
+// Substituting the layout, that is sum_k A[i][k]*B[k][j], so
+//
+//   D = init + A@B
+//
+// a genuine matrix product with no transpose hardware anywhere. Verified
+// against an independent textbook triple loop -- see tb case M1.
 //
 //   INIT_ZERO   init = 0        D = A@B          (bit-identical to the v0 design)
 //   INIT_C      init = c_in     D = A@B + C      C supplied externally
 //   INIT_KEEP   init = D_prev   D = A@B + D_prev chains k-tiles, no reset needed
 //
-// FEED A COLUMN-MAJOR AND THIS IS A MATRIX PRODUCT. With memory word k holding
-// column k of A (lane i = A[i][k]) and word k of B holding row k of B, the sum
-// above is sum_k A[i][k]*B[k][j] = (A@B)[i][j]. No transpose hardware exists or
-// is needed; the layout requirement is on whoever fills the memories. Verified
-// against an independent triple loop -- see tb case M1.
+// WHY ONLY A IS TRANSPOSED, AND WHY THAT IS NOT A DESIGN CHOICE. In
+// C[i][j] = sum_k A[i][k]*B[k][j] the contraction index k is A's COLUMN index
+// and B's ROW index. So ANY dataflow that iterates over k must walk A
+// column-wise and B row-wise: the asymmetry is in the definition of matrix
+// multiplication, not in this implementation, and no choice of architecture
+// escapes it. What varies is which slices you take --
+//
+//   inner product   for each output (i,j): row i of A  . column j of B
+//   outer product   for each k:            col k of A (x) row k of B, accumulated
+//
+// This design is the second: A@B = sum_k (col_k A)(row_k B), a sum of N rank-1
+// updates, which is why one cycle touches all N*N accumulators at once instead
+// of finishing one output at a time.
+//
+// The transpose is therefore not eliminated, it is RELOCATED to whoever fills
+// the memories: gathering Amem[k] is a STRIDED read of A while Bmem[k] is
+// CONTIGUOUS. Free in gates, not free in the data-prep step. See check_matmul
+// in tb_mac_array.v for the packing that this module requires.
 //
 // COST OF THE ADDEND, measured (yosys generic synth, total cells, N=4):
 //

@@ -103,16 +103,42 @@ entries.
 
 ## What the design computes
 
+**Two names, one convention.** `A`/`B` are the mathematical matrices, indexed
+`[row][col]`. `Amem`/`Bmem` are what the two memories hold, indexed `[k][lane]` —
+literally what `act_rdata` and `wgt_rdata` deliver, one word of `N` signed INT4
+lanes per `k`. The required layout is:
+
+| | holds | so | |
+|---|---|---|---|
+| `Amem[k]` | **column** k of A | `Amem = Aᵀ` | **A is stored transposed** |
+| `Bmem[k]` | **row** k of B | `Bmem = B` | B is not |
+
+In terms of what the ports see, and then what it means:
+
 ```
-D[i][j] = init[i][j] + sum over k of  A[k][i] * B[k][j]    for k in [0, k_dim)
+D[i][j] = init[i][j] + sum over k of  Amem[k][i] * Bmem[k][j]   for k in [0, k_dim)
+        = init[i][j] + sum over k of     A[i][k] *    B[k][j]
+   D    = init + A@B
 ```
 
 `init` is selected by `init_mode`: `INIT_ZERO` (D = A@B), `INIT_C`
 (D = A@B + C, C supplied on `c_in`), or `INIT_KEEP` (D = A@B + D_prev, which
-chains k-tiles with no reset). **Feed A column-major and this is a matrix
-product** — `sum_k A[i][k]*B[k][j]`. There is no transpose hardware; the layout
-requirement is on whoever fills the memories. Verified against a textbook triple
-loop in tb cases M1/M2.
+chains k-tiles with no reset). Verified against a textbook triple loop in tb
+cases M1/M2.
+
+**Why only A is transposed, and why that isn't a design choice.** In
+`C[i][j] = Σ_k A[i][k]·B[k][j]` the contraction index `k` is A's *column* index
+and B's *row* index, so any dataflow iterating over `k` must walk A column-wise
+and B row-wise. The asymmetry is in the definition of matrix multiplication, not
+in this implementation. What varies is which slices you take — an inner-product
+array takes row `i` of A against column `j` of B per output; this one is
+outer-product, taking column `k` of A against row `k` of B per *cycle* and
+accumulating a rank-1 update, `A@B = Σ_k (col_k A)(row_k B)`. That is why one
+cycle touches all `N²` accumulators instead of finishing one output.
+
+So there is no transpose *hardware* — the transpose is **relocated** to whoever
+fills the memories, where gathering `Amem[k]` is a strided read of A and
+`Bmem[k]` is contiguous. Free in gates, not free in data prep.
 
 Measured cost of the addend (yosys generic synth, N=4, total cells): chaining is
 free (4937 -> 4935), external C costs +381 cells and is entirely the data mux

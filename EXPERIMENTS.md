@@ -154,10 +154,12 @@ to be interesting, and scale up.
 
 ### f1 findings — the +C addend
 
-`D[i][j] = init[i][j] + sum_k A[k][i]*B[k][j]`, with `init` selected by
-`init_mode`: `INIT_ZERO`, `INIT_C` (external `c_in`), or `INIT_KEEP` (hold, so
-`D = A@B + D_prev`). Two rows because they are two separate ideas: f1a is
-chaining, f1b is an arbitrary externally-supplied addend.
+`D[i][j] = init[i][j] + Σ_k Amem[k][i]·Bmem[k][j]`, which under the layout the
+hardware requires (`Amem[k]` = column k of A, `Bmem[k]` = row k of B) is
+`init + A@B`. `init` is selected by `init_mode`: `INIT_ZERO`, `INIT_C` (external
+`c_in`), or `INIT_KEEP` (hold, so `D = A@B + D_prev`). Two rows because they are
+two separate ideas: f1a is chaining, f1b is an arbitrary externally-supplied
+addend. See the `mac_array` header for why only A is stored transposed.
 
 **Chaining is free. Arbitrary C is not.**
 

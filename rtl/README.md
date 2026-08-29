@@ -6,17 +6,26 @@ One file: `mac_array.v`. It is the **v0 baseline** — deliberately the simplest
 ## What it computes
 
 ```
-C[i][j] = Σ over k of  A[k][i] · B[k][j]        for k in [0, k_dim)
+D[i][j] = init[i][j] + Σ over k of  Amem[k][i] · Bmem[k][j]   for k in [0, k_dim)
 ```
 
-`A[k]` and `B[k]` are each `N` signed INT4 lanes packed into one memory word.
+`Amem[k]` and `Bmem[k]` are each `N` signed INT4 lanes packed into one memory
+word — memory coordinates, indexed `[k][lane]`, which is what `act_rdata` and
+`wgt_rdata` carry. The mathematical matrices `A`/`B` are indexed `[row][col]`,
+and the required layout is **`Amem[k]` = column k of A, `Bmem[k]` = row k of B**.
+So `Amem = Aᵀ`, `Bmem = B` — only A is stored transposed — and the sum above is
+`Σ_k A[i][k]·B[k][j]`, i.e. `D = init + A@B`. That asymmetry is forced by matmul
+itself: `k` is A's column index and B's row index. See the `mac_array.v` header.
+
 This is an **outer-product accumulation**: every cycle it reads one activation
 word and one weight word, forms the full N×N outer product, and adds it into
-N² independent accumulators.
+N² independent accumulators — so every cycle touches all N² outputs, rather than
+finishing one output at a time.
 
 The block **masters its own memory ports** — it drives `act_addr`/`wgt_addr` and
-expects read data one cycle later (ordinary synchronous SRAM). Results drain as
-N² sequential writes on `out_we`/`out_addr`/`out_wdata`.
+expects read data one cycle later (ordinary synchronous SRAM). Results leave
+either as N² sequential writes on `out_we`/`out_addr`/`out_wdata` (`OUT_PAR=0`)
+or all at once on `out_all` in a single cycle (`OUT_PAR=1`).
 
 ## Parameters
 
@@ -25,10 +34,27 @@ N² sequential writes on `out_we`/`out_addr`/`out_wdata`.
 | `N` | 4 | array edge. **Must be a power of two.** Instantiates N² MACs |
 | `KW` | 16 | width of `k_dim`, so max accumulation depth is 2^KW − 1 |
 | `ACC_W` | 24 | accumulator width |
-| `RAW`, `OAW` | derived | `$clog2(N)`, `$clog2(N²)`. **Do not override** |
+| `C_PORT` | 1 | build the external-C preload path so `INIT_C` works. `0` prunes `c_in` and its N² muxes, and returns the accumulator's free sync-reset pin |
+| `OUT_PAR` | 0 | `0` = serial drain, N² cycles through an N²:1 mux. `1` = all N² accumulators at once on `out_all`, 1 cycle |
+| `RAW`, `OAW`, `OUT_AW` | derived | `$clog2(N)`, `$clog2(N²)`, and `N²·ACC_W` or 1. **Do not override** — the module asserts `OUT_AW` was not |
 
 `N` is a *compile-time* array size; `k_dim` is a *run-time* input. Changing `N`
-builds different silicon. Changing `k_dim` does not.
+builds different silicon. Changing `k_dim` does not. Same for `C_PORT` and
+`OUT_PAR`: both change the hardware, so `make sim-matrix` builds all 12
+combinations of `N` × `C_PORT` × `OUT_PAR` — a parameter only ever shipped in one
+state is dead code with a name.
+
+Cycle counts follow from `OUT_PAR`, and are asserted by the testbench:
+
+```
+OUT_PAR=0   cycles = K + N² + 3        K=4, N=4  →  23
+OUT_PAR=1   cycles = K + 4             K=4, N=4  →   8
+```
+
+The drain is a *fixed* cost, so it is nearly free at long K (98% of multiplier
+cycles do useful work at K=1024) and dominates at the small tile a tensor core is
+defined by (17% at K=4). Because it scales as N², `OUT_PAR=1` makes the cycle
+count independent of N — 32.9× fewer cycles at K=4, N=16.
 
 ### Accumulator width arithmetic — do this every time you touch a width
 

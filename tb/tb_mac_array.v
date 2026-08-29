@@ -347,13 +347,20 @@ module tb_mac_array;
                     a_mat[i][j] = ((i*N + j)*5 + 3) % 16 - 8;
                     b_mat[i][j] = ((j*N + i)*7 + 1) % 16 - 8;
                 end
+            // THIS LOOP IS THE LAYOUT CONTRACT the RTL header describes, and it
+            // is where the "transpose" actually lives. a_mat/b_mat are the
+            // MATHEMATICAL matrices [row][col]; amem/wmem are memory words
+            // indexed [k]. Note the asymmetry, and that it is not arbitrary:
+            // k is A's column index and B's row index, so gathering a word of A
+            // is a STRIDED read (a_mat[i][k], k fixed) while B is CONTIGUOUS
+            // (b_mat[k][j]). No gate in the DUT does this; the cost is here.
             for (k = 0; k < N; k = k + 1) begin
                 w = {(N*4){1'b0}};
                 for (i = 0; i < N; i = i + 1) w[i*4 +: 4] = a_mat[i][k];
-                amem[k] = w;                              // column k of A
+                amem[k] = w;                    // column k of A  -> amem = A^T
                 w = {(N*4){1'b0}};
                 for (j = 0; j < N; j = j + 1) w[j*4 +: 4] = b_mat[k][j];
-                wmem[k] = w;                              // row k of B
+                wmem[k] = w;                    // row    k of B  -> wmem = B
             end
 
             run_case_m(name, N, mode);                    // DUT vs outer-product
