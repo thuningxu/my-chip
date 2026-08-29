@@ -22,9 +22,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ORFS="${ORFS:-$HOME/sd/OpenROAD-flow-scripts}"
 
+DESIGN=mac_array
 N=4
 CPORT=1
 OUTPAR=0
+SAT=1
 PERIOD=1.00
 UTIL=40
 TAG=""
@@ -32,9 +34,11 @@ RUN_SIM=1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -d) DESIGN="$2"; shift 2 ;;
     -n) N="$2"; shift 2 ;;
     -c) CPORT="$2"; shift 2 ;;
     -r) OUTPAR="$2"; shift 2 ;;
+    -s) SAT="$2"; shift 2 ;;
     -p) PERIOD="$2"; shift 2 ;;
     -u) UTIL="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
@@ -45,12 +49,38 @@ done
 
 # shellcheck source=scripts/nick.sh
 source "$HERE/scripts/nick.sh"
-NICK="$(nick "$N" "$CPORT" "$TAG" "$OUTPAR")"
+
+# Everything that differs per design is decided ONCE, here: the artifact name,
+# the RTL file list, the testbench, the top parameters and the sim -P flags. Adding
+# a third design means adding one case, not editing five scattered places.
+case "$DESIGN" in
+  mac_array)
+    NICK="$(nick "$N" "$CPORT" "$TAG" "$OUTPAR")"
+    RTL_LIST="$HERE/rtl/mac_array.v"
+    TB_FILE="$HERE/tb/tb_mac_array.v"
+    TOP_PARAMS="N $N C_PORT $CPORT OUT_PAR $OUTPAR"
+    SIM_PARAMS=(-Ptb_mac_array.N="$N" -Ptb_mac_array.C_PORT="$CPORT"
+                -Ptb_mac_array.OUT_PAR="$OUTPAR")
+    CFG_DESC="N=$N C_PORT=$CPORT OUT_PAR=$OUTPAR"
+    ;;
+  amx_tdpbssd)
+    NICK="$(nick_amx "$SAT" "$TAG")"
+    RTL_LIST="$HERE/rtl/amx_tdpbssd.v"
+    TB_FILE="$HERE/tb/tb_amx_tdpbssd.v"
+    TOP_PARAMS="SAT $SAT"
+    SIM_PARAMS=(-Ptb_amx_tdpbssd.SAT="$SAT")
+    CFG_DESC="SAT=$SAT"
+    ;;
+  *)
+    echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd" >&2
+    exit 2 ;;
+esac
+
 PERIOD_PS=$(python3 -c "print(int(round(float('$PERIOD')*1000)))")
 
 # ---------------------------------------------------------------- 1. simulate
 if [[ $RUN_SIM -eq 1 ]]; then
-  echo "== simulating (N=$N C_PORT=$CPORT OUT_PAR=$OUTPAR) =="
+  echo "== simulating $DESIGN ($CFG_DESC) =="
   if ! command -v iverilog >/dev/null; then
     echo "FATAL: iverilog not found. brew install icarus-verilog" >&2
     exit 1
@@ -58,11 +88,10 @@ if [[ $RUN_SIM -eq 1 ]]; then
   SIMDIR=$(mktemp -d)
   # Every parameter that changes the hardware must be passed here too. Gating on
   # a simulation of a DIFFERENT configuration than the one being synthesised
-  # would make the gate decorative.
+  # would make the gate decorative. Note $RTL_LIST, not rtl/*.v: the simulated
+  # file set has to be the synthesised one for the same reason.
   iverilog -g2005 -o "$SIMDIR/tb.vvp" \
-    -Ptb_mac_array.N="$N" -Ptb_mac_array.C_PORT="$CPORT" \
-    -Ptb_mac_array.OUT_PAR="$OUTPAR" \
-    "$HERE/tb/tb_mac_array.v" "$HERE/rtl"/*.v
+    "${SIM_PARAMS[@]}" "$TB_FILE" $RTL_LIST
   if ! vvp "$SIMDIR/tb.vvp" | tee "$SIMDIR/sim.log" | grep -q "^RESULT: PASS"; then
     echo "FATAL: regression FAILED -- refusing to produce a PPA number." >&2
     grep -E "\[FAIL\]|RESULT:" "$SIMDIR/sim.log" >&2 || true
@@ -91,9 +120,9 @@ for t in config.mk constraint.sdc; do
 done
 
 sed -e "s|@NICK@|$NICK|g" \
-    -e "s|@N@|$N|g" \
-    -e "s|@C_PORT@|$CPORT|g" \
-    -e "s|@OUT_PAR@|$OUTPAR|g" \
+    -e "s|@DESIGN@|$DESIGN|g" \
+    -e "s|@VERILOG_FILES@|$RTL_LIST|g" \
+    -e "s|@TOP_PARAMS@|$TOP_PARAMS|g" \
     -e "s|@UTIL@|$UTIL|g" \
     -e "s|@PERIOD_PS@|$PERIOD_PS|g" \
     -e "s|@RTL_DIR@|$HERE/rtl|g" \
@@ -116,7 +145,7 @@ for f in "$CFG_DIR/config.mk" "$CFG_DIR/constraint.sdc"; do
 done
 
 # ---------------------------------------------------------------- 3. run flow
-echo "== running ORFS (N=$N, period=${PERIOD}ns, util=$UTIL) =="
+echo "== running ORFS ($DESIGN, $CFG_DESC, period=${PERIOD}ns, util=$UTIL) =="
 # WORK_HOME/DESIGN_HOME redirect every output away from the ORFS tree.
 # DESIGN_CONFIG must be absolute since it is no longer under $ORFS/flow.
 MAKE_ARGS=(

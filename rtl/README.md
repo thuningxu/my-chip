@@ -1,7 +1,18 @@
-# rtl/ — the design
+# rtl/ — the designs
 
-One file: `mac_array.v`. It is the **v0 baseline** — deliberately the simplest
-*correct* design, not a fast one, so there is somewhere to climb from.
+| file | what | scale |
+|---|---|---|
+| `mac_array.v` | INT4 outer-product MAC array — the **v0 baseline**, deliberately the simplest *correct* design so there is somewhere to climb from | 16 multipliers at N=4 |
+| `amx_tdpbssd.v` | **Intel AMX `TDPBSSD`** — INT8 tile dot-product, `C += A@B`, with optional INT32 saturation | 1024 multipliers, 16 cycles |
+
+The two are independent top-level modules with no shared code. `measure.sh -d`
+selects which one to build, and each is passed only its own file — the ORFS
+config used to glob `rtl/*.v`, which meant a syntax error in one broke synthesis
+of the other.
+
+---
+
+# mac_array
 
 ## What it computes
 
@@ -138,3 +149,85 @@ plan: it makes the worst path *local to one PE*, so it stops depending on N.
   the `{drow, dcol}` concatenation forming `out_addr` only equals `drow*N + dcol`
   when N is a power of two. There is an `initial` block that checks this.
 - **No floating point anywhere.** Everything is integer/fixed-point.
+
+---
+
+# amx_tdpbssd — Intel AMX `TDPBSSD`
+
+Tile dot-product, signed INT8 × signed INT8, accumulating into INT32:
+**`C += A @ B`** on a `(16,64) @ (64,16) → (16,16)` shape — 16,384 MACs per
+instruction. Semantics taken from the x86 ISA reference, not recalled.
+
+## The physical shape is not the logical shape
+
+**This is the one thing to get right.** All three `tmm` registers are 16 rows ×
+64 bytes. "B is 64×16" describes the *logical* matrix; the pseudocode indexes
+`tsrc2.row[k]` with `k` in 0…15, so B is **VNNI-interleaved** into the same
+16×64 register as A:
+
+| reg | operand | physical → logical | shape |
+|---|---|---|---|
+| `tmm0` | A (`tsrc1`) | `A_phys[m].byte[4k+b] = A[m][4k+b]` | 16×64 INT8, plain row-major |
+| `tmm1` | B (`tsrc2`) | `B_phys[k].byte[4n+b] = B[4k+b][n]` | 64×16 INT8, **interleaved** |
+| `tmm2` | C (`tsrcdest`) | `C_phys[m].dword[n] = C[m][n]` | 16×16 INT32, row-major |
+
+Four *consecutive* logical rows of B (`4k`…`4k+3`) share one physical row, so
+byte `b` of B's dword `n` lines up with byte `b` of A's dword `k`. With `K = 4k+b`
+that is `C[m][n] += Σ_K A[m][K]·B[K][n]`.
+
+Get the interleave wrong and you still get plausible numbers. Verified by
+mutation: reversing the byte pairing is caught **only** by the asymmetric and
+random cases — the all-ones and all-`−128` cases pass a wrong interleave, because
+uniform tiles cannot detect a reordering.
+
+## Saturation is a deliberate deviation
+
+Intel's `DPBD` is plain modular INT32 — no clamp. So both behaviours are built:
+
+| `SAT` | behaviour | |
+|---|---|---|
+| 0 | wraps | **bit-exact ISA conformance** |
+| 1 | clamps to `[−2³¹, 2³¹−1]` | the deviation (default) |
+
+**Where the clamp goes is part of the specification**, because saturating
+addition is not associative: folding per step versus once after a tree over the
+same four values gives `−1` versus `+1073741824`. It goes **once per k-step**,
+which is exactly Intel's `DPBD` call boundary.
+
+That is also what makes a k-outermost machine conformant to an m-outermost
+specification: for a fixed `(m,n)` the k sequence is 0…15 in both, because `m`
+and `n` index independent accumulators.
+
+Note what saturation *cannot* reach: one instruction from `C=0` tops out at
+`64 × 16384 = 1,048,576` — 21 bits. **A single TDPBSSD cannot overflow INT32**
+(2047× margin). Saturation only matters for the `C +=` chain, so the tests
+preload `tmm2` near the rails rather than hoping a long run gets there.
+
+## Architecture
+
+1024 multipliers, 16 cycles — one `k` per cycle with every `m` and `n` parallel,
+which is the Sapphire Rapids rate. Widths are derived, not guessed:
+
+```
+product     −128·127 … −128·−128 = [−16256, +16384]   → 16 bits signed
+sum of four                        [−65024, +65536]   → 18 bits signed
+accumulator                                              32 bits
+```
+
+`sum4` therefore *cannot* overflow — only the final add can, which is why the
+clamp sits there and nowhere else.
+
+## Hard constraints — do not "fix" these
+
+- **The tiles are flat packed vectors, not unpacked arrays.** `reg [511:0] t [0:15]`
+  is inferred as a *memory*, and ORFS rejects it outright
+  (`SYNTH_MEMORY_MAX_BITS`). More fundamentally it is wrong: the datapath reads a
+  dword from **all 16 rows of A in the same cycle**, so it would need 16
+  concurrent read ports. No SRAM has that. These are registers by necessity.
+- **`cacc` is per-dword, not packed rows.** Packing C into 512-bit rows would put
+  16 always blocks on different bit ranges of one array element — not something to
+  rely on a synthesis tool accepting. Each accumulator gets exactly one driver.
+- **The accumulator's `if/else-if` is flat, not nested** — same flop-inference
+  lesson as `mac_array`.
+- **Tile geometry is `localparam`, not `parameter`.** Changing it does not give a
+  smaller TDPBSSD, it gives a different instruction.

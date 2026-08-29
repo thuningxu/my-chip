@@ -28,6 +28,14 @@ CPORT  ?= 1
 # no arguments still reproduces the published v0/f1 rows.
 OUTPAR ?= 0
 
+# Which design. mac_array is the INT4 outer-product baseline; amx_tdpbssd is the
+# Intel AMX TDPBSSD implementation (INT8, 1024 multipliers, 16 cycles).
+DESIGN ?= mac_array
+
+# amx_tdpbssd only. SAT=0 wraps, which is BIT-EXACT Intel; SAT=1 saturates to
+# INT32, which is a deliberate deviation. Both are built and measured.
+SAT    ?= 1
+
 -include local.mk
 
 IVERILOG ?= iverilog
@@ -48,7 +56,8 @@ help:
 	@echo "  make check           check dependencies only, install nothing"
 	@echo ""
 	@echo "  make sim             run the regression            (N=$(N))"
-	@echo "  make sim-matrix      regression across N x CPORT x OUTPAR (12 configs)"
+	@echo "  make sim-amx         AMX TDPBSSD regression        (SAT=$(SAT))"
+	@echo "  make sim-matrix      both designs, all parameter states (14 configs)"
 	@echo "  make sim-all         run the regression at N=4,8,16"
 	@echo "  make golden          run the Python reference model"
 	@echo ""
@@ -56,7 +65,8 @@ help:
 	@echo "                       coarse cells, pre-techmap -- $(BUILD)/schematic/"
 	@echo ""
 	@echo "  make measure         sim-gated synth+P&R, print a QoR row"
-	@echo "                       (N=$(N) CPORT=$(CPORT) OUTPAR=$(OUTPAR) PERIOD=$(PERIOD) UTIL=$(UTIL))"
+	@echo "                       (DESIGN=$(DESIGN) N=$(N) CPORT=$(CPORT) OUTPAR=$(OUTPAR)"
+	@echo "                        SAT=$(SAT) PERIOD=$(PERIOD) UTIL=$(UTIL))"
 	@echo "  make gds             build+verify the GDS of a routed config"
 	@echo "  make path            worst timing path of the last measure -- WHY"
 	@echo "                       the clock is what it is"
@@ -120,14 +130,32 @@ sim-all:
 sim-matrix:
 	@for n in 4 8 16; do for c in 0 1; do for r in 0 1; do \
 	  $(MAKE) --no-print-directory sim N=$$n CPORT=$$c OUTPAR=$$r >/dev/null \
-	    && echo "  PASS  N=$$n CPORT=$$c OUTPAR=$$r" \
-	    || { echo "  FAIL  N=$$n CPORT=$$c OUTPAR=$$r"; exit 1; }; \
+	    && echo "  PASS  mac_array   N=$$n CPORT=$$c OUTPAR=$$r" \
+	    || { echo "  FAIL  mac_array   N=$$n CPORT=$$c OUTPAR=$$r"; exit 1; }; \
 	done; done; done
-	@echo "== all 12 configurations PASS =="
+	@for s in 0 1; do \
+	  $(MAKE) --no-print-directory sim-amx SAT=$$s >/dev/null \
+	    && echo "  PASS  amx_tdpbssd SAT=$$s" \
+	    || { echo "  FAIL  amx_tdpbssd SAT=$$s"; exit 1; }; \
+	done
+	@echo "== all 14 configurations PASS =="
+
+.PHONY: sim-amx
+# The AMX regression. Separate target rather than a DESIGN switch on `sim`,
+# because the two testbenches take different parameters and silently accepting
+# N= for a design that has no N would be worse than refusing it.
+sim-amx: $(BUILD)
+	@echo "== AMX TDPBSSD regression SAT=$(SAT) =="
+	@$(IVERILOG) -g2005 -o $(BUILD)/tb_amx_s$(SAT).vvp \
+	  -Ptb_amx_tdpbssd.SAT=$(SAT) tb/tb_amx_tdpbssd.v rtl/amx_tdpbssd.v
+	@vvp $(BUILD)/tb_amx_s$(SAT).vvp | tee $(BUILD)/sim_amx_s$(SAT).log
+	@grep -q '^RESULT: PASS' $(BUILD)/sim_amx_s$(SAT).log \
+	  || { echo "AMX regression FAILED"; exit 1; }
 
 .PHONY: golden
 golden:
 	@$(PYTHON) tb/golden.py --n $(N) --k 37 --seed 1
+	@$(PYTHON) tb/amx_golden.py
 
 #-----------------------------------------------------------------------------
 # Schematics. Not gated on sim: these are drawings of the RTL, not claims about
@@ -142,19 +170,21 @@ schematic:
 .PHONY: measure
 measure: require-setup
 	@ORFS="$(ORFS)" YOSYS_EXE="$(YOSYS_EXE)" KLAYOUT_CMD="$(KLAYOUT_CMD)" \
-	  ./scripts/measure.sh -n $(N) -c $(CPORT) -r $(OUTPAR) -p $(PERIOD) -u $(UTIL) $(if $(TAG),-t $(TAG),)
+	  ./scripts/measure.sh -d $(DESIGN) -n $(N) -c $(CPORT) -r $(OUTPAR) -s $(SAT) \
+	     -p $(PERIOD) -u $(UTIL) $(if $(TAG),-t $(TAG),)
 
 # Build/rebuild the GDS for an already-routed config, without re-running the
 # flow. measure.sh does this inline now; this is for configs routed before that
 # fix, or to regenerate. Verifies the stream, it does not just check the file.
 .PHONY: gds
 gds: require-setup
-	@./scripts/gds.sh -n $(N) -c $(CPORT) -r $(OUTPAR) $(if $(TAG),-t $(TAG),)
+	@./scripts/gds.sh -d $(DESIGN) -n $(N) -c $(CPORT) -r $(OUTPAR) -s $(SAT) $(if $(TAG),-t $(TAG),)
 
 # Why the clock is what it is. Requires a completed `make measure N=<N>`.
 .PHONY: path
 path: require-setup
-	@./scripts/report_path.sh -n $(N) --cport $(CPORT) --outpar $(OUTPAR) $(if $(TAG),-t $(TAG),)
+	@./scripts/report_path.sh -d $(DESIGN) -n $(N) --cport $(CPORT) --outpar $(OUTPAR) \
+	     --sat $(SAT) $(if $(TAG),-t $(TAG),)
 
 .PHONY: sweep-period
 sweep-period: require-setup

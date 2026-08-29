@@ -30,6 +30,19 @@ nick() {
     printf 'my_chip_n%s%s%s%s' "$1" "${2:+_c$2}" "$r" "${3:+_$3}"
 }
 
+# nick_amx <SAT> <TAG>   -- artifact name for the amx_tdpbssd design.
+#
+# A separate function rather than more fields on nick(): the two designs have
+# disjoint parameter sets (N/C_PORT/OUT_PAR vs SAT), and cramming both into one
+# name builder would mean every mac_array name grew an empty SAT slot. The
+# distinct `amx_` prefix also guarantees no collision with the `my_chip_*`
+# artifacts already on disk. SAT is always emitted -- this design has no legacy
+# names to preserve, and 'which saturation mode' is exactly what you want on the
+# directory.
+nick_amx() {
+    printf 'amx_s%s%s' "${1:-1}" "${2:+_$2}"
+}
+
 # List the nicknames that actually exist, for error messages. A "missing
 # directory" error that shows what IS there turns a silent mismatch into an
 # obvious one.

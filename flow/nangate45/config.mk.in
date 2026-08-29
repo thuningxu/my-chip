@@ -7,17 +7,24 @@
 # Absolute paths appear here only via placeholders that measure.sh fills in with
 # repo-local locations. Nothing points into the ORFS checkout: WORK_HOME and
 # DESIGN_HOME (passed on the make command line) keep every artifact in-repo.
-export DESIGN_NAME     = mac_array
+export DESIGN_NAME     = @DESIGN@
 export DESIGN_NICKNAME = @NICK@
 export PLATFORM        = nangate45
 
 # RTL is read straight out of the repo -- never copied.
-export VERILOG_FILES = $(wildcard @RTL_DIR@/*.v)
+#
+# This is an EXPLICIT file list, not $(wildcard @RTL_DIR@/*.v). The glob pulled
+# every module in rtl/ into every build, so adding a second design meant a syntax
+# error in one broke synthesis of the other, and yosys elaborated modules no run
+# needed. measure.sh passes only the files the requested design actually uses.
+export VERILOG_FILES = @VERILOG_FILES@
 export SDC_FILE      = @CFG_DIR@/constraint.sdc
 
-# Array size. Verified to scale the design through synthesis: flip-flop counts
-# match N*N*24 + control at both N=4 and N=16.
-export VERILOG_TOP_PARAMS = N @N@ C_PORT @C_PORT@ OUT_PAR @OUT_PAR@
+# Top-level parameters, which differ per design -- measure.sh builds this string.
+# mac_array:   N <n> C_PORT <c> OUT_PAR <r>   (flip-flop counts verified to
+#              track N*N*ACC_W + control at both N=4 and N=16)
+# amx_tdpbssd: SAT <s>
+export VERILOG_TOP_PARAMS = @TOP_PARAMS@
 
 export CORE_UTILIZATION       = @UTIL@
 export PLACE_DENSITY_LB_ADDON = 0.2

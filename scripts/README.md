@@ -17,11 +17,21 @@ improve it. Use both — a row without a known limiter is a row you cannot act o
 simulates, synthesises or draws a config takes all three. They are spelled
 differently in different places for reasons that are not cosmetic:
 
-| | Makefile | `measure.sh` / `gds.sh` / `schematic.sh` | `report_path.sh` |
-|---|---|---|---|
-| array size | `N` | `-n` | `-n` |
-| external C | `CPORT` | `-c` | `--cport` |
-| parallel readout | `OUTPAR` | `-r` | `--outpar` |
+| | Makefile | `measure.sh` / `gds.sh` | `report_path.sh` | design |
+|---|---|---|---|---|
+| which design | `DESIGN` | `-d` | `-d` | both |
+| array size | `N` | `-n` | `-n` | `mac_array` |
+| external C | `CPORT` | `-c` | `--cport` | `mac_array` |
+| parallel readout | `OUTPAR` | `-r` | `--outpar` | `mac_array` |
+| INT32 saturation | `SAT` | `-s` | `--sat` | `amx_tdpbssd` |
+
+`measure.sh` decides everything design-specific in ONE `case` — the artifact
+name, the RTL file list, the testbench, the top parameters and the sim `-P`
+flags. Adding a third design means adding one case, not editing five places.
+
+The ORFS config template no longer globs `rtl/*.v`. It did, which meant every
+build elaborated every module and a syntax error in one design broke synthesis of
+the other; `VERILOG_FILES` is now an explicit per-design list.
 
 `report_path.sh` uses long names because its `-c` was already **count** before
 `C_PORT` existed. Renaming it would silently change what `-c 5` means.
@@ -36,6 +46,14 @@ A nickname omits a field when it is at its default, so `OUT_PAR=0` produces
 `my_chip_n4_c1`, not `my_chip_n4_c1_r0` — every artifact that predates a
 parameter keeps resolving. Note that `${4:+_r$4}` would have broken this: `:+`
 tests for *non-empty*, and `"0"` is non-empty.
+
+`amx_tdpbssd` gets its own builder, `nick_amx`, rather than more fields on
+`nick()`. The two designs have **disjoint** parameter sets (`N`/`C_PORT`/`OUT_PAR`
+vs `SAT`), so one shared builder would grow every `mac_array` name an empty `SAT`
+slot. The distinct `amx_` prefix also guarantees no collision with the
+`my_chip_*` artifacts already on disk. `SAT` is always emitted there — that
+design has no legacy names to preserve, and *which saturation mode* is exactly
+what you want visible on the directory.
 
 ## report_path.sh
 

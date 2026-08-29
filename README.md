@@ -1,11 +1,23 @@
 # my-chip
 
-A hill-climbing project on an INT4 MAC array, using open-source EDA
+A hill-climbing project on matrix-multiply hardware, using open-source EDA
 (Yosys + OpenROAD via ORFS) on the Nangate45 academic PDK.
 
 The deliverable is **not** the chip. It is `EXPERIMENTS.md` — a table of
 measured, reproducible rows where every row is one idea, and every number says
 what kind of number it is.
+
+Two designs live here, selected with `DESIGN=`:
+
+| design | what | scale |
+|---|---|---|
+| **`mac_array`** (default) | INT4 outer-product MAC array. The v0 baseline, deliberately the simplest *correct* design. `D = init + A@B` with three init modes and two readout modes | 16 mult at N=4, 256 at N=16 |
+| **`amx_tdpbssd`** | **Intel AMX `TDPBSSD`** — INT8 tile dot-product, `C += A@B` on `(16,64)@(64,16)`, 16,384 MACs, with optional INT32 saturation | 1024 mult, 16 cycles |
+
+```bash
+make sim-matrix                          # both designs, all parameter states
+make measure DESIGN=amx_tdpbssd SAT=1    # synth + P&R one of them
+```
 
 ## Prerequisites
 

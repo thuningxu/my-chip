@@ -52,10 +52,20 @@ which is a routine source of inflated headline numbers.
 
 ## Results
 
-Row ids use two prefixes. **`v`** rows are the performance experiments from the
-plan below — each trades cycles for clock. **`f`** rows add a *capability* and
-report what it cost; they are not attempts to go faster, and a small fmax loss in
-an `f` row is a price, not a regression.
+There are now **two designs**, and their rows are tabulated separately because
+their metrics are not comparable: `mac_array` is measured in cycles for a
+runtime-variable K, `amx_tdpbssd` in cycles for one fixed-shape instruction.
+Forcing them into one table would put a "Cycles @K=1024" number next to a design
+that has no K.
+
+- **`mac_array`** — INT4 outer-product array, `D = init + A@B`. Rows below.
+- **`amx_tdpbssd`** — Intel AMX `TDPBSSD`, INT8, `C += A@B`. See
+  [amx rows](#results--amx_tdpbssd).
+
+Row ids in the `mac_array` table use two prefixes. **`v`** rows are the
+performance experiments from the plan below — each trades cycles for clock.
+**`f`** rows add a *capability* and report what it cost; they are not attempts to
+go faster, and a small fmax loss in an `f` row is a price, not a regression.
 
 
 | # | Design | N | Stage | Period | Setup WS | Implied fmax | DRC | Hold WS | Cycles @K=1024 | stdcells | flip-flops | area µm² | power W | Notes |
@@ -339,6 +349,90 @@ is a legacy path.
 
 **Power is again not credible** (0.070 → 0.075 W), for the reason given under
 f1b: `out_all` terminates at top-level pins whose load is assumed, not derived.
+
+## Results — amx_tdpbssd
+
+Intel AMX `TDPBSSD`: tile dot-product, signed INT8 × signed INT8 accumulating
+into INT32, `C += A @ B` on `(16,64) @ (64,16) → (16,16)`. **16,384 MACs per
+instruction**, 1024 multipliers, 16 k-steps. Semantics taken from the x86 ISA
+reference, not recalled.
+
+### What is verified, independent of any PPA number
+
+**Functional: 14/14 at both `SAT` settings**, checked against *four* models — the
+DUT, the ISA pseudocode transcribed onto physical tiles, a textbook triple loop
+on logical matrices, and `tb/amx_golden.py`. The three-model structure is
+deliberate: a bug in the tile packing makes the DUT and the ISA model agree with
+each other and both disagree with the textbook model, while a bug in the RTL's
+reading of the layout makes the DUT disagree with the ISA model. Two failures,
+two distinct signatures.
+
+**Cycles: 17 per instruction, asserted not printed** (16 k-steps + the IDLE→RUN
+transition). At 16,384 MACs that is **964 MACs/cycle** against 1024 multipliers —
+94% utilisation, and the missing 6% is the single transition cycle.
+
+**The VNNI interleave is the thing that can silently break**, and its coverage is
+measured rather than assumed. Reversing B's byte pairing is caught by the
+asymmetric and random cases *only* — the all-ones and all-`−128` cases pass a
+wrong interleave, because uniform tiles cannot detect a reordering, and the
+mixed-sign case happens to be period-2 in `b` so its four-byte sum is invariant
+under reversal. Four mutations, three caught in both modes, one correctly dead at
+`SAT=0`; the table is in [tb/README.md](tb/README.md).
+
+### Saturation is a deviation, and it is parameterised for that reason
+
+Intel's `DPBD` is plain modular INT32 — `c := c + p0+p1+p2+p3`, no clamp. `SAT=1`
+was requested and **is** a departure from the ISA, so both are built:
+
+| `SAT` | behaviour | |
+|---|---|---|
+| 0 | wraps | **bit-exact ISA conformance** — the conformance test stays meaningful |
+| 1 | clamps to `[−2³¹, 2³¹−1]` | the deviation (default) |
+
+**Where the clamp goes is part of the specification, not an implementation
+detail**, because saturating addition is not associative. Folding per step versus
+once after a tree over the same four values gives `−1` versus `+1073741824` —
+verified, not asserted. It goes once per k-step, which is exactly Intel's `DPBD`
+call boundary, so the two modes differ only in the clamp and never in the
+summation order.
+
+That is also the only reason this machine can claim conformance at all: it runs
+**k outermost** (all `m` and `n` parallel) while the ISA runs **m outermost**. For
+a fixed `(m,n)` the k sequence is 0…15 in both, because `m` and `n` index
+independent accumulators. Move the fold anywhere else and the orders diverge.
+
+**What saturation cannot reach:** one instruction from `C=0` tops out at
+`64 × 16384 = 1,048,576` — 21 bits, a 2047× margin. **A single TDPBSSD cannot
+overflow INT32.** Saturation only ever matters for the `C +=` chain across
+instructions, which is why cases S1–S4 preload `tmm2` within 5 of each rail
+instead of hoping a long run gets there.
+
+Coarse-cell cost of the clamp, pre-techmap at N/A geometry (this design has fixed
+geometry): 8,091 cells at `SAT=0` versus 8,859 at `SAT=1`, i.e. **+768 = 3 cells
+per accumulator** — the overflow XOR, the rail select and the fold mux, times 256.
+Treat that as a lower bound on area, not an estimate: this project has twice
+measured a coarse-cell delta mispredict the routed one (`c_in` +381 → +1,170;
+`out_all` −911 → +99).
+
+### A synthesis lesson that cost a run
+
+The first ORFS attempt **failed outright** in synthesis:
+
+```
+Error: Synthesized memory size 4096 exceeds SYNTH_MEMORY_MAX_BITS
+```
+
+The tiles were declared `reg [511:0] tmm_a [0:15]` — an unpacked array, which
+yosys infers as a **memory**. Raising the threshold would have been the wrong fix.
+The datapath reads a dword from **all 16 rows of A in the same cycle**, so it
+needs 16 concurrent read ports; no SRAM has that, and these can only ever be
+flip-flops. They are now flat packed vectors with part-select access, which says
+so in the declaration instead of arguing with a threshold until it agrees.
+
+Note which array was *not* the problem: `cacc`, the 256 accumulators, was already
+being converted to registers (`Replacing memory \cacc with list of registers`)
+because each element has its own driver from the generate loop. Same intent, two
+different outcomes, decided by how the array is written.
 
 ### Note on GDS (applies to every row above)
 

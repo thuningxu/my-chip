@@ -42,6 +42,11 @@
 # graph is not a schematic. It is hand-drawn from the case statement, and
 # guarded by yosys fsm_extract reporting the same state count.
 #
+# Only mac_array is drawn here. amx_tdpbssd has 1024 multipliers and 24,576 flops;
+# there is no cut of it that is a readable page, and its interesting property (the
+# VNNI byte pairing) is a LAYOUT contract, not a topology -- a schematic would
+# show 1024 identical multipliers and tell you nothing about it.
+#
 # Layout images are NOT produced here. ORFS already writes them during
 # `make measure` to work/reports/nangate45/<nick>/base/final_*.webp. A layout
 # is not a schematic and this script does not blur the two.

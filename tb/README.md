@@ -1,11 +1,29 @@
 # tb/ — verification
 
-Two files, with different jobs:
+Four files, two designs, and a deliberate independence structure:
 
 | File | Role |
 |---|---|
-| `tb_mac_array.v` | the regression. Self-checking, computes its own expected values |
-| `golden.py` | a **second opinion** + the accumulator-width checker |
+| `tb_mac_array.v` | the `mac_array` regression. Self-checking, computes its own expected values |
+| `golden.py` | a **second opinion** on `mac_array` + the accumulator-width checker |
+| `tb_amx_tdpbssd.v` | the `amx_tdpbssd` (Intel `TDPBSSD`) regression — **three** models in one file |
+| `amx_golden.py` | a **fourth** opinion on TDPBSSD: VNNI pack/unpack and both saturation modes |
+
+`tb_amx_tdpbssd.v` carries three models rather than one because the AMX tile
+layout has two independent ways to be wrong:
+
+| model | reads | catches |
+|---|---|---|
+| the DUT | physical tiles | — |
+| `model_isa` | physical tiles — the ISA pseudocode, transcribed | a wrong reading of the layout by the RTL |
+| `model_matmul` | **logical** matrices — a textbook triple loop that never mentions dwords or interleaving | a wrong `pack_tiles()`, which `model_isa` cannot see |
+
+A bug in the packing makes the DUT and `model_isa` agree with each other and both
+disagree with `model_matmul`. A bug in the RTL makes the DUT disagree with
+`model_isa`. Two failures, two distinct signatures — a single expected-value
+model could not tell them apart, and a VNNI interleave is exactly the kind of
+mistake that produces plausible numbers. `amx_golden.py` is tied in through one
+fixed vector, so all four families are pinned together.
 
 ## Why this directory is the most important one in the repo
 
@@ -25,13 +43,22 @@ The only thing standing between you and that outcome is this directory.
 ## Running it
 
 ```bash
-make sim              # N=4
+make sim              # mac_array, N=4
 make sim N=8          # any power of two
 make sim-all          # N = 4, 8, 16
-make golden           # the Python reference
+make sim OUTPAR=1     # parallel readout
+make sim-amx          # amx_tdpbssd, SAT=1
+make sim-amx SAT=0    # ...and bit-exact Intel wrapping
+make sim-matrix       # BOTH designs, every parameter state -- 14 configs
+make golden           # both Python references
 ```
 
-Currently 9/9 pass at N=4, N=8, and N=16.
+Current state: **22/22** for `mac_array` at N=4/8/16 × `C_PORT` × `OUT_PAR`
+(16/16 at `C_PORT=0`, where the `INIT_C` cases are skipped rather than silently
+reinterpreted), and **14/14** for `amx_tdpbssd` at both `SAT` settings.
+
+`make sim-matrix` builds every parameter in both states on purpose: a parameter
+that only ever ships in one configuration is dead code with a name.
 
 ## The nine cases — each maps to a bug that actually shipped
 
@@ -95,6 +122,31 @@ T3 (K=0) correctly still passes — there is nothing to over-accumulate. That is
 not a gap in coverage.
 
 **Re-run this injection whenever you add a case or restructure the checker.**
+
+### The AMX suite, mutation-tested the same way
+
+Four mutations were injected into `rtl/amx_tdpbssd.v`, and the results are worth
+keeping because two of them are instructive:
+
+| mutation | `SAT=0` | `SAT=1` | caught by |
+|---|---|---|---|
+| reverse B's byte pairing (`3-b`) | 4 fail | 4 fail | T3, T5, S5 |
+| transpose the accumulator index | 5 fail | 5 fail | T3, T5, S5, C1 |
+| read A's byte lanes unsigned | 6 fail | 7 fail | T3, T4, T5, S5 |
+| `ovf = raw[32]`, dropping `^ raw[31]` | **survives** | 7 fail | S2, S4, T3, T5 |
+
+1. **T1, T2 and T4 all pass the byte-reversal mutant.** Uniform tiles cannot
+   detect a reordering, and T4's pattern is period-2 in `b` so its four-byte sum
+   is *invariant* under reversal. Only the asymmetric and random cases catch it —
+   deleting `fill_asym` would quietly remove the interleave coverage entirely.
+   Same shape of lesson as `mac_array`'s T4 being unable to catch unsigned INT4
+   slicing, because `−8×−8` and `8×8` are bit-identical.
+
+2. **The overflow-detect mutant surviving at `SAT=0` is correct, not a gap.** The
+   fold is `((SAT != 0) && ovf) ? rail : raw[31:0]`, so at `SAT=0` `ovf` is dead
+   logic that the parameter prunes. A mutation in pruned hardware has nothing to
+   detect — and a suite that "caught" it would be reporting on a signal the
+   netlist does not contain.
 
 ## Adding a case
 

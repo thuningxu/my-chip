@@ -21,7 +21,7 @@
 # you want to regenerate. It works from 6_final.def, so it does not re-run
 # synthesis, placement or routing.
 #
-# Usage:  scripts/gds.sh [-n N] [-c C_PORT] [-r OUT_PAR] [-t TAG]
+# Usage:  scripts/gds.sh [-d DESIGN] [-n N] [-c C_PORT] [-r OUT_PAR] [-s SAT] [-t TAG]
 #=============================================================================
 set -euo pipefail
 
@@ -35,19 +35,25 @@ YOSYS_EXE="$(sed -n 's/^YOSYS_EXE *:= *//p'   "$HERE/local.mk")"
 KLAYOUT_CMD="$(sed -n 's/^KLAYOUT_CMD *:= *//p' "$HERE/local.mk")"
 [[ -n "$ORFS" ]] || { echo "ORFS unset in local.mk" >&2; exit 1; }
 
-N=4; CPORT=1; OUTPAR=0; TAG=""
+DESIGN=mac_array; N=4; CPORT=1; OUTPAR=0; SAT=1; TAG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -d) DESIGN="$2"; shift 2 ;;
     -n) N="$2"; shift 2 ;;
     -c) CPORT="$2"; shift 2 ;;
     -r) OUTPAR="$2"; shift 2 ;;
+    -s) SAT="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
 # An empty CPORT is legal: it addresses configs routed before C_PORT existed.
-NICK="$(nick "$N" "$CPORT" "$TAG" "$OUTPAR")"
+case "$DESIGN" in
+  mac_array)   NICK="$(nick "$N" "$CPORT" "$TAG" "$OUTPAR")" ;;
+  amx_tdpbssd) NICK="$(nick_amx "$SAT" "$TAG")" ;;
+  *) echo "FATAL: unknown design '$DESIGN'" >&2; exit 2 ;;
+esac
 WORK="$HERE/work"
 R="$WORK/results/nangate45/$NICK/base"
 CFG="$WORK/designs/nangate45/$NICK/config.mk"
@@ -110,8 +116,8 @@ import pya, sys
 ly = pya.Layout(); ly.read("$GDS")
 top = ly.top_cell(); bb = top.bbox(); d = ly.dbu
 w, h = bb.width()*d, bb.height()*d
-if top.name != "mac_array":
-    sys.exit("FATAL: top cell is '%s', expected 'mac_array'" % top.name)
+if top.name != "$DESIGN":
+    sys.exit("FATAL: top cell is '%s', expected '$DESIGN'" % top.name)
 if w <= 0 or h <= 0:
     sys.exit("FATAL: empty bounding box -- the stream has no geometry")
 print("   top=%s  die=%.1f x %.1f um  area=%.0f um2  cell defs=%d  layers=%d"

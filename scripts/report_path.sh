@@ -21,32 +21,39 @@ ORFS="$(sed -n 's/^ORFS *:= *//p' "$HERE/local.mk")"
 # NOTE -c is COUNT here, not C_PORT -- it predates the parameter. C_PORT and
 # OUT_PAR therefore use long names, which is also why the Makefile passes
 # --cport/--outpar rather than the short flags measure.sh uses.
-N=4; CPORT=1; OUTPAR=0; TAG=""; GROUP="core_clock"; COUNT=1
+DESIGN=mac_array; N=4; CPORT=1; OUTPAR=0; SAT=1
+TAG=""; GROUP="core_clock"; COUNT=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -d) DESIGN="$2"; shift 2 ;;
     -n) N="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
     -g) GROUP="$2"; shift 2 ;;
     -c) COUNT="$2"; shift 2 ;;
     --cport) CPORT="$2"; shift 2 ;;
     --outpar) OUTPAR="$2"; shift 2 ;;
+    --sat) SAT="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
 # shellcheck source=scripts/nick.sh
 source "$HERE/scripts/nick.sh"
-NICK="$(nick "$N" "$CPORT" "$TAG" "$OUTPAR")"
+case "$DESIGN" in
+  mac_array)   NICK="$(nick "$N" "$CPORT" "$TAG" "$OUTPAR")"; CFG_DESC="N=$N C_PORT=$CPORT OUT_PAR=$OUTPAR" ;;
+  amx_tdpbssd) NICK="$(nick_amx "$SAT" "$TAG")";                CFG_DESC="SAT=$SAT" ;;
+  *) echo "FATAL: unknown design '$DESIGN'" >&2; exit 2 ;;
+esac
 R="$HERE/work/results/nangate45/$NICK/base"
 P="$ORFS/flow/platforms/nangate45"
 
 for f in 6_final.odb 6_final.sdc 6_final.spef; do
   if [[ ! -f "$R/$f" ]]; then
     echo "FATAL: $R/$f missing." >&2
-    echo "       Looked for config '$NICK' (N=$N C_PORT=$CPORT OUT_PAR=$OUTPAR${TAG:+ TAG=$TAG})." >&2
+    echo "       Looked for config '$NICK' ($DESIGN $CFG_DESC${TAG:+ TAG=$TAG})." >&2
     echo "       Available in work/:" >&2
     nick_available "$HERE" | sed 's/^/         /' >&2
-    echo "       Run: make measure N=$N CPORT=$CPORT OUTPAR=$OUTPAR" >&2
+    echo "       Run: make measure DESIGN=$DESIGN $CFG_DESC" >&2
     exit 1
   fi
 done
