@@ -33,6 +33,10 @@ LOG_JSONL="$HERE/experiments/trials.jsonl"
 X=""; Y=""; GOAL=""
 DESIGN=amx_tdpbssd
 SAT=1; PIPE=0; PERIOD=2.80; UTIL=40; HOLD_MARGIN=""
+# A written-down prediction the trial will CHECK, not merely sit next to. The
+# first X1-Y1 attempt was a duplicate of its own baseline for 17 minutes because
+# the flop count was logged and never compared to what the change had to add.
+EXPECT_FF=""
 DRY=0
 
 while [[ $# -gt 0 ]]; do
@@ -46,6 +50,7 @@ while [[ $# -gt 0 ]]; do
     -p) PERIOD="$2"; shift 2 ;;
     -u) UTIL="$2"; shift 2 ;;
     --hold-margin) HOLD_MARGIN="$2"; shift 2 ;;
+    --expect-flops) EXPECT_FF="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -111,6 +116,21 @@ FLW=$(grep -rhoE 'FLW-0009\] Clock [a-z_]+ slack -?[0-9.]+' \
         "$HERE/work/logs/nangate45/$NICK/base/"*.log 2>/dev/null | tail -1 \
         | grep -oE '\-?[0-9.]+$' || true)
 
+# PREDICTION CHECK. A trial whose hardware does not match what the change was
+# supposed to build is not a measurement of that change, whatever the PPA says.
+PRED_NOTE=""
+if [[ -n "$EXPECT_FF" && -f "$NETLIST" ]]; then
+  GOT_FF=$(grep -coE '^[[:space:]]*(DFF|SDFF)[A-Z_]*_X[0-9]+' "$NETLIST" || true)
+  if [[ "$GOT_FF" != "$EXPECT_FF" ]]; then
+    PRED_NOTE="PREDICTION MISSED: expected $EXPECT_FF flip-flops, netlist has $GOT_FF"
+    echo "  !! $PRED_NOTE" >&2
+    echo "     The built hardware is not what this Y was supposed to build, so the" >&2
+    echo "     PPA below does not measure this Y. Recorded as a bug on the trial." >&2
+  else
+    echo "  prediction OK: $GOT_FF flip-flops, as expected"
+  fi
+fi
+
 python3 - "$LOG_JSONL" "$R" "${DRC:-}" "${GDS:-}" "$NETLIST" <<PY
 import json, os, sys, subprocess
 jsonl, rep, drc, gds, netlist = sys.argv[1:6]
@@ -159,6 +179,11 @@ else:
     if ${FLW:-None} is not None and abs(${FLW:-0} - ws) > 0.05:
         rec["bugs"] = ["FLW-0009 (%.4f) disagrees with routed setup WS (%.4f) by >0.05 ns"
                        % (${FLW:-0}, ws)]
+    if """$PRED_NOTE""".strip():
+        rec.setdefault("bugs", []).append("""$PRED_NOTE""".strip())
+        # A missed prediction demotes the result: the numbers are real but they
+        # do not describe the change this trial claims to be testing.
+        rec["result"] = "OK_BUT_WRONG_HARDWARE"
 with open(jsonl, "a") as f:
     f.write(json.dumps(rec) + "\n")
 print()
