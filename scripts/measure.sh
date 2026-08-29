@@ -179,9 +179,16 @@ if [[ $FLOW_RC -ne 0 ]]; then
     # make aborts on that failure and the GDS rule never runs. For a long time
     # this script called that "layout images unavailable" and moved on, while the
     # actual consequence was that NO GDS WAS EVER PRODUCED. Recover it explicitly.
-    echo "   WARNING: 6_report image rendering failed (GUI-0070); metrics are intact."
-    echo "            Layout images unavailable. Recovering the GDS, which the"
-    echo "            aborted 'finish' target would otherwise have skipped..."
+    # Be precise about what was actually lost. This used to say "layout images
+    # unavailable", which is FALSE and misleading: GUI-0013 fails on the
+    # "Timing Path/*" display control specifically, so 9 of the 10 images are
+    # already on disk by the time it fires -- only final_worst_path.webp is lost.
+    # Verified by mtime: final_all.webp lands one second BEFORE the error is
+    # logged, and the failure is in final_report.tcl, not save_images.tcl.
+    echo "   WARNING: 6_report failed at GUI-0070 (no 'Timing Path' display control)."
+    echo "            Metrics are intact and 9 of 10 layout images were written;"
+    echo "            only final_worst_path.webp is lost. Recovering the GDS, which"
+    echo "            the aborted 'finish' target would otherwise have skipped..."
     set +e
     ( cd "$ORFS/flow" && make "${MAKE_ARGS[@]}" do-gds ) >> "$LOG" 2>&1
     GDS_RC=$?

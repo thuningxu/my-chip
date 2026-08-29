@@ -50,6 +50,11 @@ Worked example at N=16: **6,223 flip-flops = 6,223 bits ≈ 778 bytes** of state
 between those last two figures is the multiply and the add counted separately,
 which is a routine source of inflated headline numbers.
 
+For `amx_tdpbssd`: **24,584 flip-flops = 3,073 bytes** (three 16×64-byte tiles,
+plus 8 control bits), and 1024 MACs/cycle × 355 MHz = **363 GMAC/s ≈ 727 INT8
+GOPS**. Do not compare that GOPS figure to the INT4 one above as if they were the
+same unit — an INT8 multiply costs 407 gates against 84 for INT4, measured.
+
 ## Results
 
 There are now **two designs**, and their rows are tabulated separately because
@@ -357,6 +362,145 @@ into INT32, `C += A @ B` on `(16,64) @ (64,16) → (16,16)`. **16,384 MACs per
 instruction**, 1024 multipliers, 16 k-steps. Semantics taken from the x86 ISA
 reference, not recalled.
 
+| # | Design | Stage | Period | Setup WS | Implied fmax | DRC | Hold WS | Cycles/instr | stdcells | flip-flops | area µm² | power W | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| a1 | `amx_tdpbssd` `SAT=1` | routed | 1.00 ns | **−1.8171** | **355 MHz** | **0** | **−0.0349** | 17 (sim) | 519,820 | 24,584 | 1,109,920 | 35.99 | 1024 INT8 MACs/cycle. Setup badly missed, TNS **−14,566**. **HOLD IS VIOLATED** — see below. Die 1554.8 µm square (2.42 mm²), GDS 423 MB, verified. 127,028 timing-repair buffers = 24% of the design. |
+
+### The headline: 29x the MACs/cycle pays for 2.2x the clock
+
+| | MAC/cycle | fmax | GMAC/s | area mm² | GMAC/s per mm² |
+|---|---|---|---|---|---|
+| `amx_tdpbssd` (INT8) | 1024 | 355 | **363.5** | 1.110 | 328 |
+| `mac_array` N=16 (INT4) | 256 | 748 | 191.5 | 0.168 | **1140** |
+| `mac_array` f2b N=4 (INT4) | 16 | 795 | 12.7 | 0.013 | 943 |
+
+Against the largest previous design: **1.90× the throughput for 6.6× the area.**
+So in GMAC/s per mm² the INT8 tile engine is **3.5× WORSE** than the INT4 array —
+which is the honest way to report it, with the caveat that these are different
+datatypes and an INT8 MAC is not an INT4 MAC. The measured multiplier ratio is
+407 gates vs 84, i.e. 4.8×, so on a per-multiplier basis 0.61× the MAC density is
+better than the 0.21× that ratio alone would predict — `mac_array` pays for a
+private accumulate adder in every cell, while this design shares one adder tree
+per four products.
+
+### Setup: 2.2x the period, and it is the logic depth
+
+−1.8171 ns against a 1.00 ns target: the design needs **2.785 ns**. That is not a
+surprise and not a placement accident — it is what putting all of this in one
+cycle costs:
+
+```
+8x8 signed multiply  ->  4-input adder tree  ->  33-bit add  ->  2 mux levels
+```
+
+against `mac_array`'s `4x4 multiply -> 24-bit add`, which already needs 1.258 ns.
+TNS is **−14,566** over **9,429 violating endpoints** — systemic, every DPBD, not
+outliers. The fix is the same one v1 proposes for `mac_array`: register the
+product between the multiply and the tree, buying clock with a cycle of latency.
+
+Timing repair spent **127,028 buffers (24% of the final cell count)** and grew the
+design from 407,034 post-synthesis stdcells to 519,820 (**+28%**) without closing.
+Buffering cannot fix logic depth; the cells were spent for nothing.
+
+### The critical path names the cost of the tile-register decision
+
+`report_path.sh -d amx_tdpbssd --sat 1`, post-route with parasitics:
+
+```
+Startpoint: kcnt[1]$_DFFE_PN0P_      (the k counter)
+Endpoint:   cacc[98][2]$_DFFE_PP_    (an accumulator)
+slack -1.817 (VIOLATED)              -- matches the row's -1.8171
+```
+
+**It starts at the k counter, not at an input port**, and that is the finding.
+`kcnt` drives the 16:1 selects that pull `a_flat[m].dword[k]` and `b_flat[k]` out
+of the tile registers, so the whole chain
+
+```
+kcnt -> 16:1 operand select -> 8x8 multiply -> adder tree -> 33-bit add -> fold -> acc
+```
+
+is one flop-to-flop path. Contrast `mac_array`, whose worst path starts at an
+*input port* (`act_rdata[...]`) because its operands come from external memory:
+it pays the SDC's 0.2 ns input delay but has **no operand mux in front of the
+multiplier**.
+
+**And it is not only logic depth — a third of the path is wire.** Cell classes on
+the worst path, counted:
+
+| | `amx_tdpbssd` | `mac_array` f2b |
+|---|---|---|
+| adder cells (`FA`/`HA`) | **9** (8 FA + 1 HA) | 6 (4 FA + 2 HA) |
+| buffers (`BUF`/`CLKBUF`) | **14** | 5 |
+| muxes (`MUX2`) | 2 | 0 |
+| total cells on path | ~45 | ~20 |
+| arrival | **3.316 ns** | 1.295 ns |
+
+1.5× the adder cells but **2.6× the arrival time**, and the gap is buffering: 14
+buffer stages, 31% of the cells on the path, driving wires across a **1554.8 µm**
+die — ten times the edge length of `mac_array`'s 155.8 µm.
+
+That changes what the fix is. Pipelining the multiply (the obvious v1-style move)
+attacks the 9 adder cells, but it does nothing about 14 buffers' worth of wire
+delay on a 2.4 mm² die. A design this size needs *physical* partitioning as well
+as logical pipelining, and this row is the evidence for that rather than an
+assumption about it.
+
+So holding the tiles internally — which was chosen to make the multiply do zero
+memory traffic and give free random access to any dword — moved the operand fetch
+*into* the critical path. That is a real, measured cost of the decision, and it was
+not in the plan's reasoning. It is also the cheapest thing to fix: register the
+selected operands, spending one cycle of latency (17 → 18) to remove the mux and
+the multiply from the same path as the accumulate.
+
+### HOLD IS VIOLATED, and that is the serious one
+
+**−0.0349 ns, 34 violating endpoints.** Setup you can fix by slowing the clock.
+**Hold you cannot** — it is a min-delay failure and it is still there at any
+period. `mac_array` at N=16 was already marginal (−0.0071); this is 5× worse.
+
+This row should therefore **not** be read as "works at 355 MHz". It is a design
+that does not meet timing at any frequency as routed, and the hold violations are
+the reason. Fixing them means hold buffers on the fast paths, which the flow's
+`repair_timing -hold_margin 0` did not fully do.
+
+### Power is not credible, but the magnitude is still a signal
+
+35.99 W on a 2.42 mm² die is ~15 W/mm², which is thermally impossible for a real
+part. Treat the number as uncalibrated for the reasons given under f1b (undriven
+inputs, assumed activity), but the order of magnitude is a legitimate warning that
+1024 INT8 multipliers switching every cycle is a power problem, not just an area
+one.
+
+### What went right
+
+**DRC clean, first routing attempt.** The plan flagged "ORFS may take a very long
+time or fail in global route" as the main risk at 3.6× the largest previously
+routed design. Global routing placed 658,918 nets in 24 seconds with no congestion
+abort, and detailed routing finished with **zero** DRC violations. The risk was
+overstated.
+
+**Flip-flops are exactly 24,584 post-route**, unchanged from synthesis — the three
+tile registers plus 8 control bits, to the bit. Nothing was optimised away across
+the entire flow.
+
+**The die estimate was close.** Planned at ~1450 µm/side, came in at 1554.8 — 7%
+high.
+
+### A process failure worth recording
+
+While this run was in flight I read the worst slack **three times and got it wrong
+twice**: −1.782 from `repair_design`'s progress table (right by luck), then
+"corrected" it to −0.006 from `repair_timing`'s per-iteration `WNS` column
+(wrong — that column tracks the batch of endpoints being repaired, not the
+design's global worst), then −1.785 from `[INFO FLW-0009]`, which the final routed
+value (−1.8171) confirms.
+
+**Read `FLW-0009`, not an optimizer's progress table.** It was cross-validated
+here: for `mac_array` f2b, `FLW-0009` reported −0.259 and the final routed slack
+was −0.2581. An in-progress optimizer's own numbers are about what it is currently
+working on, not about the design.
+
 ### What is verified, independent of any PPA number
 
 **Functional: 14/14 at both `SAT` settings**, checked against *four* models — the
@@ -486,6 +630,7 @@ a routed design with no GDS is not a built chip. Verified output:
 | `my_chip_n4_c1` | f1b | 6.6 MB | `mac_array` | 160.2 × 160.2 µm |  99 |
 | `my_chip_n4_c0_r1` | f2a | 5.7 MB | `mac_array` | 151.5 × 151.5 µm | 103 |
 | `my_chip_n4_c1_r1` | f2b | 6.5 MB | `mac_array` | 155.8 × 155.8 µm | 102 |
+| `amx_s1` | a1 | **423 MB** | `amx_tdpbssd` | **1554.8 × 1554.8 µm** | 103 |
 
 Every one is verified rather than merely present: `scripts/gds.sh` reads the
 stream back, asserts the top cell is `mac_array` with a non-empty bounding box,
