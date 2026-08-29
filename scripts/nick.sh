@@ -13,9 +13,21 @@
 # So there is now one function. Do not re-derive the name anywhere else.
 #=============================================================================
 
-# nick <N> <C_PORT> <TAG>   -- C_PORT and TAG may be empty
+# nick <N> <C_PORT> <TAG> <OUT_PAR>   -- C_PORT, TAG and OUT_PAR may be empty
+#
+# OUT_PAR is appended ONLY when non-zero, so every name that existed before the
+# parameter was added still resolves to the same directory. That is not cosmetic:
+# my_chip_n4, my_chip_n4_c0 and my_chip_n4_c1 each hold a verified GDS and back a
+# published EXPERIMENTS.md row. Renaming them would orphan that provenance.
+#
+# `${4:+_r$4}` would be WRONG here -- :+ tests for non-empty, and the string "0"
+# is non-empty, so the default config would have been renamed to _r0. Hence the
+# explicit test.
 nick() {
-    printf 'my_chip_n%s%s%s' "$1" "${2:+_c$2}" "${3:+_$3}"
+    local r=""
+    if [[ -n "${4:-}" && "${4:-}" != "0" ]]; then r="_r$4"; fi
+    # TAG stays last so sweep tags read as a suffix: my_chip_n4_c1_r1_p120
+    printf 'my_chip_n%s%s%s%s' "$1" "${2:+_c$2}" "$r" "${3:+_$3}"
 }
 
 # List the nicknames that actually exist, for error messages. A "missing

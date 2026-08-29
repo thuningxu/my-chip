@@ -17,7 +17,7 @@ export SDC_FILE      = @CFG_DIR@/constraint.sdc
 
 # Array size. Verified to scale the design through synthesis: flip-flop counts
 # match N*N*24 + control at both N=4 and N=16.
-export VERILOG_TOP_PARAMS = N @N@ C_PORT @C_PORT@
+export VERILOG_TOP_PARAMS = N @N@ C_PORT @C_PORT@ OUT_PAR @OUT_PAR@
 
 export CORE_UTILIZATION       = @UTIL@
 export PLACE_DENSITY_LB_ADDON = 0.2

@@ -34,16 +34,90 @@
 // in the array below, which is what makes that true. Set C_PORT=0 to get the
 // 381 cells back if you only ever chain.
 //
+// HOW RESULTS COME OUT -- chosen by OUT_PAR, and it decides the cycle count:
+//
+//   OUT_PAR=0  serial drain. One element per cycle through an N*N : 1 mux on
+//              out_wdata, addressed by out_addr. Costs N*N cycles.
+//   OUT_PAR=1  parallel. All N*N accumulators presented at once on out_all,
+//              out_we a single-cycle strobe. Costs 1 cycle. No mux at all --
+//              out_all is a plain concatenation of the accumulator outputs.
+//
+// Measured cycle counts fit exactly, over 20 cases with K from 0 to 2048:
+//
+//   cycles = K + N*N + 3      OUT_PAR=0, K >= 1
+//   cycles = K + 4            OUT_PAR=1, K >= 1
+//   (K == 0 costs one less: IDLE jumps straight to S_DRAIN, so the rd_valid
+//    pipeline never fills. The tb asserts this model, it does not just print it.)
+//
+// The 3 is start-latch + SRAM read latency + done. WHY THIS MATTERS: the drain
+// is a FIXED cost, so multiplier utilisation depends entirely on K --
+//
+//   K=1024, OUT_PAR=0   1043 cycles   drain 1.5% of the time    98.2% utilised
+//   K=4,    OUT_PAR=0     23 cycles   drain 70% of the time     17.4% utilised
+//   K=4,    OUT_PAR=1      8 cycles   drain 12% of the time     50.0% utilised
+//
+// So the serial drain is nearly free when streaming long K and catastrophic on
+// the small tile a tensor core is defined by. Both modes are therefore
+// PERMANENT, not a compatibility courtesy: out_all is N*N*ACC_W bits -- 384 at
+// N=4 but 6,144 at N=16 -- so the parallel readout is only sane because a
+// tensor-core tile is small. Keep the serial drain for large-N streaming.
+//
+// COST OF THE READOUT, measured (yosys generic synth, N=4):
+//
+//   C_PORT  OUT_PAR   cells   port bits   flops
+//   0       0          4938         503     455
+//   0       1          4027         886     422
+//   1       0          5330         503     455
+//   1       1          4418         886     422
+//
+// In GENERIC terms OUT_PAR=1 looks cheaper: -911 cells and -33 flops for +383
+// port bits. The serial drain is not just a mux -- it is an N*N:1 mux plus two
+// counters, an index multiply-add and an address decode, all to move data that
+// out_all reaches with plain wires. The -33 flops are drow/dcol (4 bits, pruned
+// outright) and out_addr/out_wdata (28 bits, which go constant and are folded
+// away later; they still show up in a coarse `prep` dump).
+//
+// BUT DO NOT BELIEVE THE -911. Routed on Nangate45 the same change measures
+// +99 stdcells (9158 -> 9257), because a 384-bit output port needs drivers and
+// the flow inserted ~400 buffers to provide them (ORFS timing_repair_buffer
+// 2804 -> 3189). The logic saving is real; the port eats it. This is the second
+// time here that a wide top-level port has cost ~1000 stdcells of buffering
+// invisible to generic synth -- c_in did the same thing in the other direction
+// (+381 generic, +1170 routed). Generic cell deltas tell you about LOGIC, never
+// about area. Cell area did fall (13664 -> 13482 um2): 33 flops are bigger than
+// 400 buffers, so count and area moved opposite ways.
+//
+// DO NOT CLAIM AN fmax EFFECT EITHER WAY. It came out +39 MHz at C_PORT=1 and
+// -9 MHz at C_PORT=0 -- same RTL change, opposite sign -- so it is placement,
+// not design. That is consistent with the worst path having the same shape in
+// every config measured (input port -> multiplier -> 24-bit accumulate -> acc
+// flop, see 1 below): no drain logic is on it before or after, so there is no
+// mechanism for OUT_PAR to change it. Quote the cycle count and the buffer cost
+// from this parameter; do not quote its frequency.
+//
+// Fair warning on that table: OUT_PAR=0 measures 5330 where the pre-OUT_PAR
+// design measured 5318. The flop count is IDENTICAL at 455 and the +12 is
+// spread across gate types (+23 $_NOR_, -36 $_OR_, +13 $_AND_, ...), i.e. abc
+// re-factoring the same logic after S_DRAIN was restructured -- not added
+// hardware. Same phenomenon as the -2 cells noted for chaining above.
+//
 // This is deliberately the SIMPLEST CORRECT design, not a fast one. It exists
 // to be the baseline you climb away from. Known costs, left in on purpose:
 //
 //   1. The full ACC_W-bit add sits in the per-cycle path (mult -> wide add ->
-//      flop). This is the first thing that will limit fmax.
+//      flop). This is the first thing that will limit fmax -- and MEASURED to
+//      be so: the routed worst path at N=4 runs act_rdata -> multiplier
+//      (FA/HA chain) -> 24-bit accumulate -> acc flop. Fix by registering the
+//      product, which costs a cycle.
 //   2. The drain reads acc[drow][dcol] with variable indices, which synthesises
 //      to an N*N : 1 mux. Harmless at N=4 (16:1); becomes the critical path at
-//      N=32 (1024:1). Fix by pipelining the readout before scaling up.
+//      N=32 (1024:1). OUT_PAR=1 removes it entirely. Note it is NOT the
+//      critical path at N=4 -- see 1 -- so OUT_PAR buys cycles, not clock.
 //   3. No pipelining anywhere. One element per cycle, which is bandwidth
 //      optimal -- any pipelining you add will COST cycles to buy clock.
+//      A 4x4x4 INT4 tile is 128 operand bits and the ports deliver 32 bits per
+//      cycle, so 4 cycles/tile is a hard floor. OUT_PAR=1 gets within 2x of it;
+//      more multipliers cannot help without widening the memory interface.
 //
 // Memory contract: read data is registered and arrives ONE cycle after the
 // request is asserted (ordinary synchronous SRAM).
@@ -64,9 +138,19 @@ module mac_array #(
     //     the clear goes back to riding the flop's free sync-reset pin. Driving
     //     INIT_C with C_PORT=0 is a design error and is caught below.
     parameter integer C_PORT = 1,
+    // 0 = serial drain on out_wdata/out_addr, N*N cycles (the v0 behaviour).
+    // 1 = parallel readout on out_all, 1 cycle. Prunes the N*N:1 mux and the
+    //     drow/dcol counters; out_addr and out_wdata go unused.
+    parameter integer OUT_PAR = 0,
     // derived -- do not override
     parameter integer RAW    = $clog2(N),
-    parameter integer OAW    = $clog2(N*N)
+    parameter integer OAW    = $clog2(N*N),
+    // Collapses to 1 bit when the parallel readout is not built, so OUT_PAR=0
+    // gains ONE dead pin rather than N*N*ACC_W of them. That is deliberate:
+    // 384 unused c_in pins measurably perturbed placement in an earlier run
+    // (row f1b), so an unused port has to actually vanish or the area number
+    // stops meaning what it says.
+    parameter integer OUT_AW = (OUT_PAR != 0) ? N*N*ACC_W : 1
 )(
     input  wire                         clk,
     input  wire                         rst_n,
@@ -97,14 +181,28 @@ module mac_array #(
     output reg  [KW-1:0]                wgt_addr,
     input  wire [N*4-1:0]               wgt_rdata,
 
-    // result write port
+    // result write port.
+    //
+    // out_we means "result data is valid this cycle" in BOTH modes, which is why
+    // there is no separate valid signal: at OUT_PAR=0 it pulses N*N times, once
+    // per element; at OUT_PAR=1 it pulses once, for the whole tile.
     output reg                          out_we,
+    // Serial readout (OUT_PAR=0). Unused, and held at 0, when OUT_PAR=1.
     output reg  [OAW-1:0]               out_addr,
     // NOTE: deliberately NOT declared `signed`. Yosys preserves the signed
     // attribute into the netlist and OpenSTA's Verilog reader rejects it
     // ("syntax error" on the port line). The bits are two's complement either
     // way; consumers interpret them as signed. Do not "fix" this.
-    output reg  [ACC_W-1:0]             out_wdata
+    output reg  [ACC_W-1:0]             out_wdata,
+
+    // Parallel readout (OUT_PAR=1), row-major: element [i][j] occupies bit
+    // (i*N + j)*ACC_W -- the same layout as c_in and as out_addr = {drow, dcol},
+    // so a tile read out here can be fed straight back into c_in. Combinational
+    // on purpose: it is a concatenation of the accumulator outputs, so it costs
+    // no mux and no flop. Registering it would add N*N*ACC_W flops (384 at N=4,
+    // nearly doubling the design's 455) to buy nothing.
+    // Width is 1 and the value is constant 0 when OUT_PAR=0.
+    output wire [OUT_AW-1:0]            out_all
 );
     // ---- derived widths -----------------------------------------------------
     localparam integer CLOG2_N  = RAW;
@@ -195,22 +293,37 @@ module mac_array #(
                 end
 
                 // -------------------------------------------------- DRAIN
+                // NESTING IS SAFE HERE, unlike in the accumulator below. OUT_PAR
+                // is an elaboration-time constant, so exactly one arm of this if
+                // survives and no mux is built. The flat-if/else-if rule on the
+                // accumulator exists because init_mode is a RUNTIME signal, where
+                // the branch shape decides whether yosys can use the flop's
+                // synchronous-reset pin. Do not generalise one to the other.
                 S_DRAIN: begin
-                    out_we    <= 1'b1;
-                    out_addr  <= {drow, dcol};
-                    out_wdata <= acc[drow][dcol];   // N*N : 1 mux -- see header
+                    out_we <= 1'b1;         // "results valid", both modes
 
-                    if (dcol == (N-1)) begin
-                        dcol <= {CLOG2_N{1'b0}};
-                        if (drow == (N-1)) begin
-                            state <= S_IDLE;
-                            busy  <= 1'b0;
-                            done  <= 1'b1;
-                        end else begin
-                            drow <= drow + 1'b1;
-                        end
+                    if (OUT_PAR != 0) begin
+                        // out_all is already showing every accumulator. Strobe
+                        // once and finish -- one cycle instead of N*N.
+                        state <= S_IDLE;
+                        busy  <= 1'b0;
+                        done  <= 1'b1;
                     end else begin
-                        dcol <= dcol + 1'b1;
+                        out_addr  <= {drow, dcol};
+                        out_wdata <= acc[drow][dcol]; // N*N : 1 mux -- see header
+
+                        if (dcol == (N-1)) begin
+                            dcol <= {CLOG2_N{1'b0}};
+                            if (drow == (N-1)) begin
+                                state <= S_IDLE;
+                                busy  <= 1'b0;
+                                done  <= 1'b1;
+                            end else begin
+                                drow <= drow + 1'b1;
+                            end
+                        end else begin
+                            dcol <= dcol + 1'b1;
+                        end
                     end
                 end
 
@@ -265,6 +378,27 @@ module mac_array #(
         end
     endgenerate
 
+    // ---- parallel readout ---------------------------------------------------
+    // The whole accumulator array flattened onto one bus. This is the entire
+    // cost of OUT_PAR=1: no mux, no flop, no arithmetic -- every bit is a wire
+    // from an accumulator's Q to an output pin. Contrast the serial drain, which
+    // needs an N*N:1 mux, two counters, index arithmetic and an address decode
+    // to move the same data out over N*N cycles.
+    generate
+        if (OUT_PAR != 0) begin : g_out_par
+            genvar orow, ocol;
+            for (orow = 0; orow < N; orow = orow + 1) begin : g_orow
+                for (ocol = 0; ocol < N; ocol = ocol + 1) begin : g_ocol
+                    assign out_all[(orow*N + ocol)*ACC_W +: ACC_W]
+                             = acc[orow][ocol];
+                end
+            end
+        end else begin : g_out_ser
+            // OUT_AW is 1 here. Tie it off so the port has a driver.
+            assign out_all = 1'b0;
+        end
+    endgenerate
+
     // ---- elaboration-time checks -------------------------------------------
     initial begin
         if (N < 2 || (N & (N-1)) != 0) begin
@@ -277,6 +411,17 @@ module mac_array #(
         end
         if (C_PORT != 0 && C_PORT != 1) begin
             $display("FATAL: C_PORT must be 0 or 1 (got %0d)", C_PORT);
+            $finish;
+        end
+        if (OUT_PAR != 0 && OUT_PAR != 1) begin
+            $display("FATAL: OUT_PAR must be 0 or 1 (got %0d)", OUT_PAR);
+            $finish;
+        end
+        // OUT_AW is derived. If someone overrides it the parallel readout
+        // silently truncates -- results past the cut just never appear.
+        if (OUT_AW != ((OUT_PAR != 0) ? N*N*ACC_W : 1)) begin
+            $display("FATAL: OUT_AW is derived and must not be overridden (got %0d, expected %0d)",
+                     OUT_AW, (OUT_PAR != 0) ? N*N*ACC_W : 1);
             $finish;
         end
     end

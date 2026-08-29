@@ -46,6 +46,8 @@ variables. Use `./setup.sh --check` to verify without installing anything.
 make help                       # all targets + resolved tool paths
 make sim N=8                    # regression at another array size
 make sim-all                    # N = 4, 8, 16
+make sim-matrix                 # N x C_PORT x OUT_PAR -- all 12 configurations
+make sim OUTPAR=1               # parallel readout: 8 cycles instead of 23
 make golden                     # Python reference model
 make measure N=8 PERIOD=1.4     # override anything
 make sweep-period               # 1.6 / 1.4 / 1.2 / 1.0 ns
@@ -118,9 +120,36 @@ free (4937 -> 4935), external C costs +381 cells and is entirely the data mux
 
 
 `A[k]` and `B[k]` are each `N` signed INT4 lanes packed into one memory word.
-The block masters two read ports and one write port; results drain as `N*N`
-sequential writes. `N` is a parameter (power of two) — sweep it with
-`measure.sh -n`.
+The block masters two read ports and one write port. `N` is a parameter (power
+of two) — sweep it with `measure.sh -n`.
+
+**How results come out is a parameter too, and it decides the cycle count.**
+`OUT_PAR=0` (default) drains one element per cycle through an `N*N:1` mux;
+`OUT_PAR=1` presents all `N*N` accumulators at once on `out_all`. Measured cycle
+counts fit exactly across 20 cases with K from 0 to 2048:
+
+| | cycles | K=4, N=4 | K=1024, N=4 |
+|---|---|---|---|
+| `OUT_PAR=0` | `K + N*N + 3` | 23 (17% of multipliers busy) | 1043 (98%) |
+| `OUT_PAR=1` | `K + 4` | **8 (50%)** | 1028 (98%) |
+
+The drain is a *fixed* cost, so it is nearly free when streaming long K and
+catastrophic on the small tile a tensor core is defined by. Because it scales as
+`N*N`, the speedup grows with the array: at K=4 it is 2.9× at N=4, 8.9× at N=8
+and **32.9× at N=16** (263 → 8 cycles).
+
+In *generic* synth `OUT_PAR=1` looks cheaper — −911 cells, since the serial drain
+is not just a mux but two counters, an index multiply-add and an address decode,
+all to move data `out_all` reaches with plain wires. **Routed, it costs +99 to
++164 stdcells instead**, because a 384-bit output port needs ~382 buffers that
+generic synth does not model. The flip-flop saving is real and exact (−33), and
+cell *area* does fall (−74 to −182 µm²) since flops are bigger than buffers.
+Coarse-cell deltas tell you about logic, never about area — see `EXPERIMENTS.md`
+rows f2a/f2b, where the same trap caught `c_in` in the other direction.
+
+Both modes are permanent: `out_all` is `N*N*ACC_W` bits, 384 at N=4 but
+**6,144 at N=16**, so the parallel readout is viable *because* a tensor-core tile
+is small. Keep the serial drain for large-N streaming.
 
 v0 is deliberately the **simplest correct** design, not a fast one: multiply and
 a full 24-bit add sit in the same cycle. That is the first thing to fix, and the
@@ -143,6 +172,9 @@ prior project of this kind:
 | `EXPERIMENTS.md` has a `Stage` column | an ABC mapping objective (900 MHz) tabulated next to routed slack as if comparable |
 | Baseline measured in *this* flow | speedups quoted against an external number that was never reproduced |
 | `N` is a parameter | dozens of near-duplicate hand-copied RTL files, one per array size |
+| The tb **asserts** cycle count, not just the result | an optimisation that quietly *cost* cycles while still computing the right answer. `OUT_PAR` exists to move that number, so leaving it unchecked would make the whole change unfalsifiable |
+| `make sim-matrix` builds every parameter in both states | a parameter that only ever ships in one configuration is dead code with a name — `C_PORT=0` and `OUT_PAR=1` each have to compile, simulate and route |
+| `nick()` is the single definition of an artifact name | `make path` reading a *different design* than `make measure` just wrote, reporting a plausible wrong critical path. Adding `OUT_PAR` to the name needed an explicit `!= "0"` test, because `${4:+...}` fires on the string `"0"` and would have renamed every existing config |
 
 ## Known gotchas already hit
 

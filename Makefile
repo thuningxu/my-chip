@@ -23,6 +23,11 @@ SN     ?= 2
 # row: the parameter is worthless if the flow cannot build both configurations.
 CPORT  ?= 1
 
+# OUT_PAR=1 reads all N*N results out in one cycle instead of draining them one
+# per cycle: K+4 cycles instead of K+N*N+3. Defaults to 0 so `make measure` with
+# no arguments still reproduces the published v0/f1 rows.
+OUTPAR ?= 0
+
 -include local.mk
 
 IVERILOG ?= iverilog
@@ -43,6 +48,7 @@ help:
 	@echo "  make check           check dependencies only, install nothing"
 	@echo ""
 	@echo "  make sim             run the regression            (N=$(N))"
+	@echo "  make sim-matrix      regression across N x CPORT x OUTPAR (12 configs)"
 	@echo "  make sim-all         run the regression at N=4,8,16"
 	@echo "  make golden          run the Python reference model"
 	@echo ""
@@ -50,7 +56,7 @@ help:
 	@echo "                       coarse cells, pre-techmap -- $(BUILD)/schematic/"
 	@echo ""
 	@echo "  make measure         sim-gated synth+P&R, print a QoR row"
-	@echo "                       (N=$(N) CPORT=$(CPORT) PERIOD=$(PERIOD) UTIL=$(UTIL))"
+	@echo "                       (N=$(N) CPORT=$(CPORT) OUTPAR=$(OUTPAR) PERIOD=$(PERIOD) UTIL=$(UTIL))"
 	@echo "  make gds             build+verify the GDS of a routed config"
 	@echo "  make path            worst timing path of the last measure -- WHY"
 	@echo "                       the clock is what it is"
@@ -94,17 +100,30 @@ $(BUILD):
 # `make measure` synthesises would make the gate meaningless. The artifact names
 # carry it for the same reason.
 sim: $(BUILD)
-	@echo "== regression N=$(N) CPORT=$(CPORT) =="
-	@$(IVERILOG) -g2005 -o $(BUILD)/tb_n$(N)_c$(CPORT).vvp \
-	  -Ptb_mac_array.N=$(N) -Ptb_mac_array.C_PORT=$(CPORT) $(TB) $(RTL)
-	@vvp $(BUILD)/tb_n$(N)_c$(CPORT).vvp | tee $(BUILD)/sim_n$(N)_c$(CPORT).log
-	@grep -q '^RESULT: PASS' $(BUILD)/sim_n$(N)_c$(CPORT).log \
+	@echo "== regression N=$(N) CPORT=$(CPORT) OUTPAR=$(OUTPAR) =="
+	@$(IVERILOG) -g2005 -o $(BUILD)/tb_n$(N)_c$(CPORT)_r$(OUTPAR).vvp \
+	  -Ptb_mac_array.N=$(N) -Ptb_mac_array.C_PORT=$(CPORT) \
+	  -Ptb_mac_array.OUT_PAR=$(OUTPAR) $(TB) $(RTL)
+	@vvp $(BUILD)/tb_n$(N)_c$(CPORT)_r$(OUTPAR).vvp \
+	  | tee $(BUILD)/sim_n$(N)_c$(CPORT)_r$(OUTPAR).log
+	@grep -q '^RESULT: PASS' $(BUILD)/sim_n$(N)_c$(CPORT)_r$(OUTPAR).log \
 	  || { echo "regression FAILED"; exit 1; }
 
 .PHONY: sim-all
 sim-all:
 	@for n in 4 8 16; do $(MAKE) --no-print-directory sim N=$$n || exit 1; done
 	@echo "== all sizes PASS =="
+
+# The full parameter matrix: 3 sizes x 2 C_PORT x 2 OUT_PAR. A parameter that is
+# never built in both states is not a parameter, it is dead code with a name.
+.PHONY: sim-matrix
+sim-matrix:
+	@for n in 4 8 16; do for c in 0 1; do for r in 0 1; do \
+	  $(MAKE) --no-print-directory sim N=$$n CPORT=$$c OUTPAR=$$r >/dev/null \
+	    && echo "  PASS  N=$$n CPORT=$$c OUTPAR=$$r" \
+	    || { echo "  FAIL  N=$$n CPORT=$$c OUTPAR=$$r"; exit 1; }; \
+	done; done; done
+	@echo "== all 12 configurations PASS =="
 
 .PHONY: golden
 golden:
@@ -115,7 +134,7 @@ golden:
 # what it computes, so they are useful even while the design is broken.
 .PHONY: schematic
 schematic:
-	@YOSYS_EXE="$(YOSYS_EXE)" ./scripts/schematic.sh -n $(SN) -c $(CPORT)
+	@YOSYS_EXE="$(YOSYS_EXE)" ./scripts/schematic.sh -n $(SN) -c $(CPORT) -r $(OUTPAR)
 
 #-----------------------------------------------------------------------------
 # Physical flow. measure.sh re-runs the regression itself and refuses to
@@ -123,19 +142,19 @@ schematic:
 .PHONY: measure
 measure: require-setup
 	@ORFS="$(ORFS)" YOSYS_EXE="$(YOSYS_EXE)" KLAYOUT_CMD="$(KLAYOUT_CMD)" \
-	  ./scripts/measure.sh -n $(N) -c $(CPORT) -p $(PERIOD) -u $(UTIL) $(if $(TAG),-t $(TAG),)
+	  ./scripts/measure.sh -n $(N) -c $(CPORT) -r $(OUTPAR) -p $(PERIOD) -u $(UTIL) $(if $(TAG),-t $(TAG),)
 
 # Build/rebuild the GDS for an already-routed config, without re-running the
 # flow. measure.sh does this inline now; this is for configs routed before that
 # fix, or to regenerate. Verifies the stream, it does not just check the file.
 .PHONY: gds
 gds: require-setup
-	@./scripts/gds.sh -n $(N) -c $(CPORT) $(if $(TAG),-t $(TAG),)
+	@./scripts/gds.sh -n $(N) -c $(CPORT) -r $(OUTPAR) $(if $(TAG),-t $(TAG),)
 
 # Why the clock is what it is. Requires a completed `make measure N=<N>`.
 .PHONY: path
 path: require-setup
-	@./scripts/report_path.sh -n $(N) --cport $(CPORT) $(if $(TAG),-t $(TAG),)
+	@./scripts/report_path.sh -n $(N) --cport $(CPORT) --outpar $(OUTPAR) $(if $(TAG),-t $(TAG),)
 
 .PHONY: sweep-period
 sweep-period: require-setup

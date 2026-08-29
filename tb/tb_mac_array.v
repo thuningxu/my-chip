@@ -57,7 +57,18 @@ module tb_mac_array;
     // skipped in that build rather than silently reinterpreted -- driving
     // INIT_C with C_PORT=0 is a design error the DUT reports at runtime.
     parameter integer C_PORT = 1;
+    // OUT_PAR=1 reads all N*N results out in one cycle on out_all instead of
+    // draining them one per cycle. Every case below runs unchanged in both
+    // modes: the collector is keyed on ADDRESS, not on arrival order, so how
+    // the results arrive is the DUT's business and not the checker's.
+    parameter integer OUT_PAR = 0;
     localparam integer DEPTH = 4096;
+    // Expected total cycles for a case, from the FSM. The tb asserts this, so a
+    // regression that still computes the right answer more slowly is a FAILURE
+    // and not a silently-accepted cost. K=0 costs one less because S_IDLE jumps
+    // straight to S_DRAIN and the rd_valid pipeline never fills.
+    localparam integer DRAIN_CYC = (OUT_PAR != 0) ? 1 : N*N;
+    localparam integer CYC_BASE  = DRAIN_CYC + 3;
     localparam integer NN    = N*N;
     localparam integer OAW   = (NN <= 2) ? 1 : $clog2(NN);
 
@@ -86,6 +97,10 @@ module tb_mac_array;
     wire                     out_we;
     wire [OAW-1:0]           out_addr;
     wire signed [ACC_W-1:0]  out_wdata;
+    // Mirrors the DUT's derived OUT_AW. Collapses to 1 bit at OUT_PAR=0 so the
+    // unused port is a single wire in both places.
+    localparam integer OUT_AW = (OUT_PAR != 0) ? NN*ACC_W : 1;
+    wire [OUT_AW-1:0]        out_all;
 
     // ---- behavioural 1-cycle-latency memories -------------------------------
     reg [N*4-1:0] amem [0:DEPTH-1];
@@ -97,13 +112,17 @@ module tb_mac_array;
     end
 
     // ---- DUT ----------------------------------------------------------------
-    mac_array #(.N(N), .KW(KW), .ACC_W(ACC_W), .C_PORT(C_PORT)) dut (
+    // OUT_AW is deliberately NOT passed: it is derived in the DUT and the DUT
+    // asserts that it was not overridden. Passing it from here would defeat that.
+    mac_array #(.N(N), .KW(KW), .ACC_W(ACC_W), .C_PORT(C_PORT),
+                .OUT_PAR(OUT_PAR)) dut (
         .clk(clk), .rst_n(rst_n),
         .start(start), .k_dim(k_dim), .busy(busy), .done(done),
         .init_mode(init_mode), .c_in(c_in),
         .act_req(act_req), .act_addr(act_addr), .act_rdata(act_rdata),
         .wgt_req(wgt_req), .wgt_addr(wgt_addr), .wgt_rdata(wgt_rdata),
-        .out_we(out_we), .out_addr(out_addr), .out_wdata(out_wdata)
+        .out_we(out_we), .out_addr(out_addr), .out_wdata(out_wdata),
+        .out_all(out_all)
     );
 
     always #0.5 clk = ~clk;
@@ -112,10 +131,23 @@ module tb_mac_array;
     reg signed [ACC_W-1:0] got [0:NN-1];
     reg        [NN-1:0]    seen;
 
+    // Keyed on ADDRESS, never on arrival order, and the wait below is "have I
+    // seen them all" rather than "have N*N cycles elapsed". That is the only
+    // reason OUT_PAR=1 needed no change to any of the 22 cases: how results
+    // arrive is the DUT's business. OUT_PAR is elaboration-constant, so at 0
+    // this reduces to exactly the pre-OUT_PAR block -- confirmed by every cycle
+    // count being identical to the pre-OUT_PAR run.
+    integer cap;
     always @(posedge clk) begin
         if (out_we) begin
-            got[out_addr]  <= out_wdata;
-            seen[out_addr] <= 1'b1;
+            if (OUT_PAR != 0) begin
+                for (cap = 0; cap < NN; cap = cap + 1)
+                    got[cap] <= out_all[cap*ACC_W +: ACC_W];
+                seen <= {NN{1'b1}};
+            end else begin
+                got[out_addr]  <= out_wdata;
+                seen[out_addr] <= 1'b1;
+            end
         end
     end
 
@@ -165,7 +197,7 @@ module tb_mac_array;
     endtask
 
     task run_case_m(input [8*24:1] name, input integer k, input [1:0] mode);
-        integer idx, guard;
+        integer idx, guard, exp_cyc;
         begin
             compute_expected(k, mode);
             seen      = {NN{1'b0}};
@@ -202,8 +234,18 @@ module tb_mac_array;
                     idx = 0;
                     while (idx < NN && got[idx] === expected[idx]) idx = idx + 1;
                     if (idx == NN) begin
-                        $display("  [PASS] %-22s K=%-6d cycles=%0d", name, k, cyc_count);
-                        pass_count = pass_count + 1;
+                        // A right answer delivered late is still a regression --
+                        // cycle count is the whole point of OUT_PAR, so it is
+                        // checked, not merely printed.
+                        exp_cyc = (k == 0) ? CYC_BASE - 1 : k + CYC_BASE;
+                        if (cyc_count !== exp_cyc) begin
+                            $display("  [FAIL] %0s : %0d cycles, expected %0d (N=%0d OUT_PAR=%0d)",
+                                     name, cyc_count, exp_cyc, N, OUT_PAR);
+                            fail_count = fail_count + 1;
+                        end else begin
+                            $display("  [PASS] %-22s K=%-6d cycles=%0d", name, k, cyc_count);
+                            pass_count = pass_count + 1;
+                        end
                     end
                 end
             end

@@ -21,7 +21,7 @@
 # you want to regenerate. It works from 6_final.def, so it does not re-run
 # synthesis, placement or routing.
 #
-# Usage:  scripts/gds.sh [-n N] [-c C_PORT] [-t TAG]
+# Usage:  scripts/gds.sh [-n N] [-c C_PORT] [-r OUT_PAR] [-t TAG]
 #=============================================================================
 set -euo pipefail
 
@@ -35,18 +35,19 @@ YOSYS_EXE="$(sed -n 's/^YOSYS_EXE *:= *//p'   "$HERE/local.mk")"
 KLAYOUT_CMD="$(sed -n 's/^KLAYOUT_CMD *:= *//p' "$HERE/local.mk")"
 [[ -n "$ORFS" ]] || { echo "ORFS unset in local.mk" >&2; exit 1; }
 
-N=4; CPORT=1; TAG=""
+N=4; CPORT=1; OUTPAR=0; TAG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -n) N="$2"; shift 2 ;;
     -c) CPORT="$2"; shift 2 ;;
+    -r) OUTPAR="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
 # An empty CPORT is legal: it addresses configs routed before C_PORT existed.
-NICK="$(nick "$N" "$CPORT" "$TAG")"
+NICK="$(nick "$N" "$CPORT" "$TAG" "$OUTPAR")"
 WORK="$HERE/work"
 R="$WORK/results/nangate45/$NICK/base"
 CFG="$WORK/designs/nangate45/$NICK/config.mk"
@@ -54,7 +55,7 @@ CFG="$WORK/designs/nangate45/$NICK/config.mk"
 for f in "$R/6_final.def" "$CFG"; do
   if [[ ! -f "$f" ]]; then
     echo "FATAL: $f missing." >&2
-    echo "       Looked for config '$NICK' (N=$N C_PORT=${CPORT:-none}${TAG:+ TAG=$TAG})." >&2
+    echo "       Looked for config '$NICK' (N=$N C_PORT=${CPORT:-none} OUT_PAR=$OUTPAR${TAG:+ TAG=$TAG})." >&2
     echo "       Available in work/:" >&2
     nick_available "$HERE" | sed 's/^/         /' >&2
     exit 1

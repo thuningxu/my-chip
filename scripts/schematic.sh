@@ -46,11 +46,16 @@
 # `make measure` to work/reports/nangate45/<nick>/base/final_*.webp. A layout
 # is not a schematic and this script does not blur the two.
 #
-# Usage:  scripts/schematic.sh [-n N] [-c C_PORT] [-o OUTDIR]
+# Usage:  scripts/schematic.sh [-n N] [-c C_PORT] [-r OUT_PAR] [-o OUTDIR]
 #
 # -c selects the same C_PORT the RTL is built with. View 08 (the accumulator
 # init path, i.e. where D = A@B + C happens) does not exist at C_PORT=0 and is
 # skipped rather than drawn empty.
+#
+# -r selects OUT_PAR. Default 0, because the serial drain is the figure worth
+# drawing: at OUT_PAR=1 view 04 is skipped, since the N*N:1 mux it shows has been
+# deleted -- and a parallel readout is a bundle of wires with nothing to draw.
+# Its absence IS the change.
 # Requires: yosys, netlistsvg  (npm i -g netlistsvg)
 #=============================================================================
 set -euo pipefail
@@ -59,6 +64,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 N=2
 CPORT=1
+OUTPAR=0
 OUT="$HERE/build/schematic"
 YOSYS="${YOSYS_EXE:-yosys}"
 
@@ -66,6 +72,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -n) N="$2"; shift 2 ;;
     -c) CPORT="$2"; shift 2 ;;
+    -r) OUTPAR="$2"; shift 2 ;;
     -o) OUT="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -103,7 +110,7 @@ L_ACC=$(anchor 'acc\[gr\]\[gc\] <= acc\[gr\]\[gc\]')
 
 c() { local l; for l in "$@"; do printf 'c:*mac_array.v:%s* ' "$l"; done; }
 
-echo "== schematics for N=$N C_PORT=$CPORT into $OUT =="
+echo "== schematics for N=$N C_PORT=$CPORT OUT_PAR=$OUTPAR into $OUT =="
 
 # ------------------------------------------------------------------ caption
 # An uncaptioned schematic is indistinguishable from a schematic of a
@@ -147,7 +154,7 @@ view() {
   local mod="${name#??_}"
   cat > "$OUT/$name.ys" <<EOF
 read_verilog $RTL
-chparam -set N $N -set C_PORT $CPORT mac_array
+chparam -set N $N -set C_PORT $CPORT -set OUT_PAR $OUTPAR mac_array
 prep -top mac_array
 select -set v $*
 submod -name $mod @v
@@ -187,7 +194,7 @@ PY
   # C_PORT changes what hardware exists, and every view shares one output
   # directory, so the configuration has to be on the face of each drawing --
   # otherwise a C_PORT=0 run silently overwrites a C_PORT=1 set.
-  caption "$OUT/$name.svg" "$title" "N=$N C_PORT=$CPORT | $sub"
+  caption "$OUT/$name.svg" "$title" "N=$N C_PORT=$CPORT OUT_PAR=$OUTPAR | $sub"
 
   # GUARD 3: caption() rewrites the SVG header by hand. Prove the result still
   # parses, still has the caption, and still has the netlist body under it.
@@ -253,20 +260,41 @@ view 03_request_gen \
 # index arithmetic ($mul drow*N, $add +dcol) -> address decode ($eq) ->
 # the select itself ($pmux) -> the output register ($adff). The header of
 # rtl/mac_array.v warns this becomes the critical path as N scales.
-view 04_drain_mux \
-  "Result readout -- the $NN:1 accumulator mux, decode and index arithmetic" \
-  "rtl/mac_array.v:$L_DRN + %co8 (one line of RTL becomes all of this)" \
-  '$mul,$add,$eq,$pmux,$adff' \
-  "$(c "$L_DRN") %co8"
+#
+# At OUT_PAR=1 none of it exists: out_all is a concatenation of the accumulator
+# outputs, so the mux, both counters, the index multiply-add and the address
+# decode are all pruned (-911 cells, measured). There is no figure to draw --
+# the replacement is wires -- so this is skipped rather than faked.
+if [[ "$OUTPAR" == "0" ]]; then
+  view 04_drain_mux \
+    "Result readout -- the $NN:1 accumulator mux, decode and index arithmetic" \
+    "rtl/mac_array.v:$L_DRN + %co8 (one line of RTL becomes all of this)" \
+    '$mul,$add,$eq,$pmux,$adff' \
+    "$(c "$L_DRN") %co8"
+else
+  printf '   %-26s %s\n' "04_drain_mux.svg" \
+    "SKIPPED -- OUT_PAR=1 pruned the ${NN}:1 mux; the readout is now plain wires"
+fi
 
 # ---- 5. control ----------------------------------------------------------
 # Every control register plus the arithmetic computing its next value. This
 # is the hardware that replaces the program counter a software loop has.
+#
+# The drow/dcol anchors have to come OUT at OUT_PAR=1. Their RTL lines still
+# exist (inside the else branch) so anchor() still resolves them, but the cells
+# are pruned -- and a select pattern matching no cell is exactly what GUARD 1
+# treats as a moved anchor. It would abort the whole run.
+CTRL_LINES="$L_K0 $L_ISS $L_CON $L_EQK"
+CTRL_DESC="$L_K0,$L_ISS,$L_CON,$L_EQK"
+if [[ "$OUTPAR" == "0" ]]; then
+  CTRL_LINES="$CTRL_LINES $L_ROW $L_COL"
+  CTRL_DESC="$CTRL_DESC,$L_ROW,$L_COL"
+fi
 view 05_control \
   "Control -- every state register and the logic that advances it" \
-  "rtl/mac_array.v:$L_K0,$L_ISS,$L_CON,$L_EQK,$L_ROW,$L_COL + %co1 + all registers" \
+  "rtl/mac_array.v:$CTRL_DESC + %co1 + all registers" \
   '$add,$eq,$adff' \
-  "$(c "$L_K0" "$L_ISS" "$L_CON" "$L_EQK" "$L_ROW" "$L_COL") %co1" 't:$adff'
+  "$(c $CTRL_LINES) %co1" 't:$adff'
 
 # ---- 6. real logic gates -- the bridge to the textbook -------------------
 # Everything above is coarse blocks. This is ONE 4x4 signed multiplier
@@ -275,7 +303,7 @@ view 05_control \
 # optimises it into an unrecognisable soup.
 cat > "$OUT/06_multiplier_gates.ys" <<EOF
 read_verilog $RTL
-chparam -set N $N -set C_PORT $CPORT mac_array
+chparam -set N $N -set C_PORT $CPORT -set OUT_PAR $OUTPAR mac_array
 prep -top mac_array
 select -set m w:*g_row[0].g_col[0].product %ci1
 submod -name mult4x4 @m
@@ -297,7 +325,7 @@ caption "$OUT/06_multiplier_gates.svg" \
 printf '   %-26s %s\n' "06_multiplier_gates.svg" "$MG 2-input gates"
 
 # ---- 7. FSM state diagram (hand-drawn, guarded) --------------------------
-STATES=$("$YOSYS" -p "read_verilog $RTL; chparam -set N $N -set C_PORT $CPORT mac_array; \
+STATES=$("$YOSYS" -p "read_verilog $RTL; chparam -set N $N -set C_PORT $CPORT -set OUT_PAR $OUTPAR mac_array; \
 prep -top mac_array; fsm_detect; fsm_extract; fsm_info" 2>/dev/null \
   | sed -n '/State encoding:/,/Transition Table/p' \
   | grep -cE "^[[:space:]]+[0-9]+:[[:space:]]+2'" || true)
@@ -305,6 +333,28 @@ if [[ "$STATES" != "3" ]]; then
   echo "FATAL: yosys fsm_extract reports $STATES states, but 07_fsm_states.svg" >&2
   echo "       is hand-drawn for 3 (IDLE/RUN/DRAIN). Redraw it or fix the RTL." >&2
   exit 1
+fi
+
+# The DRAIN state's behaviour is the one thing OUT_PAR changes, so the two arcs
+# that describe it are substituted rather than hardcoded. At OUT_PAR=1 there is
+# genuinely no drain self-loop -- S_DRAIN strobes once and leaves -- so drawing
+# one would make the figure lie about the design it is captioned as.
+if [[ "$OUTPAR" == "0" ]]; then
+  NTRANS=9
+  DRAIN_LOOP_A="out_we&lt;=1, one result per cycle"
+  DRAIN_LOOP_C="else"
+  DRAIN_LOOP_ARC='<path class="e" d="M896,203 C876,172 964,172 944,203"/>'
+  DRAIN_EXIT_C="drow == N-1 &amp;&amp; dcol == N-1"
+  DRAIN_EXIT_A="done&lt;=1, busy&lt;=0 &#8212; but out_we is STILL 1 this cycle, carrying the LAST result"
+  DRAIN_NOTE="S_DRAIN always runs N*N cycles, whatever K is. Compute efficiency = K/(K + N*N)."
+else
+  NTRANS=8
+  DRAIN_LOOP_A="(no self-loop: one cycle and out)"
+  DRAIN_LOOP_C=""
+  DRAIN_LOOP_ARC=""
+  DRAIN_EXIT_C="unconditional (OUT_PAR=1)"
+  DRAIN_EXIT_A="out_we&lt;=1 strobes ONCE; out_all already shows all N*N accumulators"
+  DRAIN_NOTE="S_DRAIN runs 1 cycle: out_all is combinational, so there is nothing to sequence. Compute efficiency = K/(K + 4)."
 fi
 
 cat > "$OUT/07_fsm_states.svg" <<EOF
@@ -321,8 +371,8 @@ cat > "$OUT/07_fsm_states.svg" <<EOF
  markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#333"/>
 </marker></defs>
 
-<text x="14" y="28" class="s" font-size="18">mac_array control FSM</text>
-<text x="14" y="49" class="n">3 states / 9 transitions &#8212; the state count is verified against yosys fsm_extract every time this is regenerated.</text>
+<text x="14" y="28" class="s" font-size="18">mac_array control FSM &#8212; N=$N, C_PORT=$CPORT, OUT_PAR=$OUTPAR</text>
+<text x="14" y="49" class="n">3 states / $NTRANS transitions &#8212; the state count is verified against yosys fsm_extract every time this is regenerated.</text>
 <text x="14" y="64" class="n">Hand-drawn from the case statement in rtl/mac_array.v, because a state graph is not a netlist and cannot be dumped from one.</text>
 
 <!-- the K=0 shortcut, arcing over the top. Control points sit at y=95 so the
@@ -335,11 +385,11 @@ cat > "$OUT/07_fsm_states.svg" <<EOF
 <text x="170" y="160" class="c" text-anchor="middle">!start</text>
 <text x="545" y="146" class="a" text-anchor="middle">issue a read; accumulate if rd_valid</text>
 <text x="545" y="160" class="c" text-anchor="middle">else</text>
-<text x="920" y="146" class="a" text-anchor="middle">out_we&lt;=1, one result per cycle</text>
-<text x="920" y="160" class="c" text-anchor="middle">else</text>
+<text x="920" y="146" class="a" text-anchor="middle">$DRAIN_LOOP_A</text>
+<text x="920" y="160" class="c" text-anchor="middle">$DRAIN_LOOP_C</text>
 <path class="e" d="M146,203 C126,172 214,172 194,203"/>
 <path class="e" d="M521,203 C501,172 589,172 569,203"/>
-<path class="e" d="M896,203 C876,172 964,172 944,203"/>
+$DRAIN_LOOP_ARC
 
 <!-- the two forward transitions -->
 <text x="357" y="224" class="a" text-anchor="middle">acc&lt;=0, counters&lt;=0, busy&lt;=1</text>
@@ -364,13 +414,14 @@ cat > "$OUT/07_fsm_states.svg" <<EOF
 
 <!-- the return arc, underneath -->
 <path class="e" d="M893,290 C830,392 250,392 196,289"/>
-<text x="545" y="416" class="c" text-anchor="middle">drow == N-1 &amp;&amp; dcol == N-1</text>
-<text x="545" y="431" class="a" text-anchor="middle">done&lt;=1, busy&lt;=0 &#8212; but out_we is STILL 1 this cycle, carrying the LAST result</text>
+<text x="545" y="416" class="c" text-anchor="middle">$DRAIN_EXIT_C</text>
+<text x="545" y="431" class="a" text-anchor="middle">$DRAIN_EXIT_A</text>
 
-<text x="14" y="464" class="n">Cost: S_RUN runs k_dim+1 cycles (the +1 is SRAM read latency). S_DRAIN always runs N*N cycles, whatever K is. Compute efficiency = K/(K + N*N).</text>
+<text x="14" y="464" class="n">Cost: S_RUN runs k_dim+1 cycles (the +1 is SRAM read latency). $DRAIN_NOTE</text>
 </svg>
 EOF
-printf '   %-26s %s\n' "07_fsm_states.svg" "3 states (hand-drawn, guarded by fsm_extract)"
+printf '   %-26s %s\n' "07_fsm_states.svg" \
+  "3 states / $NTRANS transitions (hand-drawn, guarded by fsm_extract)"
 
 # ---- 8. the addend: where D = A@B + C is actually built -------------------
 # c_in touches the design in exactly one place -- one branch of the

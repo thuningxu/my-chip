@@ -4,15 +4,45 @@
 |---|---|
 | `measure.sh` | RTL → **one row of `EXPERIMENTS.md`** |
 | `report_path.sh` | routed design → **the worst timing path**, i.e. *why* the clock is what it is |
+| `gds.sh` | routed design → a **verified GDS**, and it fails rather than accept an unverified one |
+| `schematic.sh` | RTL → eight **readable schematics** at the coarse-cell level |
+| `nick.sh` | the **single definition** of an artifact nickname — sourced, never run |
 
 `measure.sh` tells you the number; `report_path.sh` tells you what to change to
 improve it. Use both — a row without a known limiter is a row you cannot act on.
 
+## Design parameters every script must agree on
+
+`N`, `C_PORT` and `OUT_PAR` all change the hardware, so every script that names,
+simulates, synthesises or draws a config takes all three. They are spelled
+differently in different places for reasons that are not cosmetic:
+
+| | Makefile | `measure.sh` / `gds.sh` / `schematic.sh` | `report_path.sh` |
+|---|---|---|---|
+| array size | `N` | `-n` | `-n` |
+| external C | `CPORT` | `-c` | `--cport` |
+| parallel readout | `OUTPAR` | `-r` | `--outpar` |
+
+`report_path.sh` uses long names because its `-c` was already **count** before
+`C_PORT` existed. Renaming it would silently change what `-c 5` means.
+
+**`nick.sh` exists because these used to drift.** `measure.sh` writes
+`work/` directories under a nickname and `report_path.sh` reads them; when they
+derived the name independently, adding `C_PORT` made `make path N=4 CPORT=1` read
+a *different design* than `make measure` had just written and report a plausible
+wrong critical path. There is now one function. Do not re-derive the name.
+
+A nickname omits a field when it is at its default, so `OUT_PAR=0` produces
+`my_chip_n4_c1`, not `my_chip_n4_c1_r0` — every artifact that predates a
+parameter keeps resolving. Note that `${4:+_r$4}` would have broken this: `:+`
+tests for *non-empty*, and `"0"` is non-empty.
+
 ## report_path.sh
 
 ```bash
-scripts/report_path.sh -n 4              # worst core_clock path, N=4
-scripts/report_path.sh -n 16 -c 5        # top 5 paths
+scripts/report_path.sh -n 4                     # worst core_clock path, N=4
+scripts/report_path.sh -n 16 -c 5               # top 5 paths (-c is COUNT here)
+scripts/report_path.sh -n 4 --cport 1 --outpar 1
 scripts/report_path.sh -n 4 -g asynchronous
 ```
 
@@ -32,16 +62,22 @@ It turns "some RTL" into one row of `EXPERIMENTS.md`, and it is the component
 that makes the hill-climb trustworthy rather than just fast.
 
 ```
-scripts/measure.sh [-n N] [-p PERIOD_NS] [-u UTIL] [-t TAG] [--no-sim]
+scripts/measure.sh [-n N] [-c C_PORT] [-r OUT_PAR] [-p PERIOD_NS] [-u UTIL]
+                   [-t TAG] [--no-sim]
 ```
 
 Normally invoked through the Makefile, which supplies tool paths from `local.mk`:
 
 ```bash
-make measure                       # N=4, 1.00 ns, util 40
+make measure                       # N=4, C_PORT=1, OUT_PAR=0, 1.00 ns, util 40
 make measure N=8 PERIOD=1.4        # override anything
+make measure OUTPAR=1              # parallel readout: 8 cycles at K=4, not 23
 make sweep-period                  # 1.6 / 1.4 / 1.2 / 1.0 ns
 ```
+
+The sim gate is passed **every** hardware parameter (`-Ptb_mac_array.N`,
+`.C_PORT`, `.OUT_PAR`). Gating on a simulation of a different configuration than
+the one being synthesised would make the gate decorative.
 
 ## The four stages
 

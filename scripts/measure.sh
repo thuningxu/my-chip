@@ -9,7 +9,8 @@
 # so the gate has to be here.
 #
 # Usage:
-#   scripts/measure.sh [-n N] [-c C_PORT] [-p PERIOD_NS] [-u UTIL] [-t TAG] [--no-sim]
+#   scripts/measure.sh [-n N] [-c C_PORT] [-r OUT_PAR] [-p PERIOD_NS] [-u UTIL]
+#                      [-t TAG] [--no-sim]
 #
 # Env:
 #   ORFS        path to OpenROAD-flow-scripts   (default: ~/sd/OpenROAD-flow-scripts)
@@ -23,6 +24,7 @@ ORFS="${ORFS:-$HOME/sd/OpenROAD-flow-scripts}"
 
 N=4
 CPORT=1
+OUTPAR=0
 PERIOD=1.00
 UTIL=40
 TAG=""
@@ -32,6 +34,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -n) N="$2"; shift 2 ;;
     -c) CPORT="$2"; shift 2 ;;
+    -r) OUTPAR="$2"; shift 2 ;;
     -p) PERIOD="$2"; shift 2 ;;
     -u) UTIL="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
@@ -42,19 +45,23 @@ done
 
 # shellcheck source=scripts/nick.sh
 source "$HERE/scripts/nick.sh"
-NICK="$(nick "$N" "$CPORT" "$TAG")"
+NICK="$(nick "$N" "$CPORT" "$TAG" "$OUTPAR")"
 PERIOD_PS=$(python3 -c "print(int(round(float('$PERIOD')*1000)))")
 
 # ---------------------------------------------------------------- 1. simulate
 if [[ $RUN_SIM -eq 1 ]]; then
-  echo "== simulating (N=$N) =="
+  echo "== simulating (N=$N C_PORT=$CPORT OUT_PAR=$OUTPAR) =="
   if ! command -v iverilog >/dev/null; then
     echo "FATAL: iverilog not found. brew install icarus-verilog" >&2
     exit 1
   fi
   SIMDIR=$(mktemp -d)
+  # Every parameter that changes the hardware must be passed here too. Gating on
+  # a simulation of a DIFFERENT configuration than the one being synthesised
+  # would make the gate decorative.
   iverilog -g2005 -o "$SIMDIR/tb.vvp" \
     -Ptb_mac_array.N="$N" -Ptb_mac_array.C_PORT="$CPORT" \
+    -Ptb_mac_array.OUT_PAR="$OUTPAR" \
     "$HERE/tb/tb_mac_array.v" "$HERE/rtl"/*.v
   if ! vvp "$SIMDIR/tb.vvp" | tee "$SIMDIR/sim.log" | grep -q "^RESULT: PASS"; then
     echo "FATAL: regression FAILED -- refusing to produce a PPA number." >&2
@@ -86,6 +93,7 @@ done
 sed -e "s|@NICK@|$NICK|g" \
     -e "s|@N@|$N|g" \
     -e "s|@C_PORT@|$CPORT|g" \
+    -e "s|@OUT_PAR@|$OUTPAR|g" \
     -e "s|@UTIL@|$UTIL|g" \
     -e "s|@PERIOD_PS@|$PERIOD_PS|g" \
     -e "s|@RTL_DIR@|$HERE/rtl|g" \
