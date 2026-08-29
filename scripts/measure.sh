@@ -28,6 +28,7 @@ N=4
 CPORT=1
 OUTPAR=0
 SAT=1
+PIPE=0
 PERIOD=1.00
 UTIL=40
 TAG=""
@@ -43,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     -c) CPORT="$2"; shift 2 ;;
     -r) OUTPAR="$2"; shift 2 ;;
     -s) SAT="$2"; shift 2 ;;
+    -P) PIPE="$2"; shift 2 ;;
     -p) PERIOD="$2"; shift 2 ;;
     -u) UTIL="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
@@ -72,14 +74,34 @@ case "$DESIGN" in
     NICK="$(nick_amx "$SAT" "$TAG")"
     RTL_LIST="$HERE/rtl/amx_tdpbssd.v"
     TB_FILE="$HERE/tb/tb_amx_tdpbssd.v"
-    TOP_PARAMS="SAT $SAT"
-    SIM_PARAMS=(-Ptb_amx_tdpbssd.SAT="$SAT")
-    CFG_DESC="SAT=$SAT"
+    TOP_PARAMS="SAT $SAT PIPE $PIPE"
+    SIM_PARAMS=(-Ptb_amx_tdpbssd.SAT="$SAT" -Ptb_amx_tdpbssd.PIPE="$PIPE")
+    CFG_DESC="SAT=$SAT PIPE=$PIPE"
     ;;
   *)
     echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd" >&2
     exit 2 ;;
 esac
+
+# GUARD: the simulated configuration and the SYNTHESISED configuration must be
+# the same one. This exists because they silently diverged: PIPE was added to the
+# RTL, the testbench and SIM_PARAMS, but not to TOP_PARAMS, so the gate ran
+# PIPE=1 and the flow built PIPE=0 -- a trial that measured a duplicate of its own
+# baseline while logging that it was something else. The comment two screens down
+# already warned that a gate on a different configuration is decorative; a comment
+# is not a check, so here is the check.
+for sp in "${SIM_PARAMS[@]}"; do
+  pname="${sp##*.}"; pname="${pname%%=*}"
+  pval="${sp##*=}"
+  if ! printf '%s' "$TOP_PARAMS" | grep -qE "(^| )$pname $pval( |\$)"; then
+    echo "FATAL: parameter drift between the sim gate and synthesis." >&2
+    echo "       sim is given   $pname = $pval" >&2
+    echo "       synth is given TOP_PARAMS = '$TOP_PARAMS'" >&2
+    echo "       Every -P passed to the testbench must appear in VERILOG_TOP_PARAMS," >&2
+    echo "       or the gate proves nothing about what actually gets built." >&2
+    exit 1
+  fi
+done
 
 PERIOD_PS=$(python3 -c "print(int(round(float('$PERIOD')*1000)))")
 

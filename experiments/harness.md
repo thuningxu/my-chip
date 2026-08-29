@@ -104,3 +104,83 @@ changes silently at `SAT=1` while `SAT=0` keeps passing, because wrapping additi
 **Y0 is mandatory and is not a comparison against a1.** Two harness knobs changed
 (period and hold margin), so a1 → Y0 is not one variable. Y0 exists to be the
 comparison point for Y1…Y3, which share its knobs exactly.
+
+### X1-Y0 result — what the harness knobs bought, before any RTL changed
+
+Y0 changed **no RTL**. It only applied X1's two harness-level knobs. Against a1:
+
+| | a1 (1.00 ns, no margin) | X1-Y0 (2.80 ns, margin 0.05) | Δ |
+|---|---|---|---|
+| setup WS | −1.8171 | −0.0565 | |
+| **hold WS** | **−0.0349, 34 viol** | **+0.0399, 0 viol** | **met** |
+| implied fmax | 355 MHz | 350 MHz | −5 |
+| stdcells | 519,820 | 509,176 | **−10,644** |
+| `timing_repair_buffer` | 127,028 | 116,591 | −10,437 |
+| area µm² | 1,109,920 | 1,086,640 | −23,280 |
+| power W | 35.99 | **19.00** | **−47%** |
+
+**Hold was not structural.** That was the open question X1 declared, and it is
+answered: hold closes with margin. **But two knobs moved at once**, so the fix is
+not attributable to the margin alone — a relaxed setup target also makes the tool
+size cells less aggressively, which eases hold independently. What is established
+is that hold is *achievable*, not which knob achieved it. Separating them would
+cost another 40-minute run and does not block the climb, so it is left open and
+labelled rather than quietly credited to the margin.
+
+**fmax is period-robust.** 355 → 350 MHz for a 2.8× change in the target. The −5
+is far inside the 48 MHz attribution noise this project already measured (rows
+f2a/f2b). So `implied_fmax = 1/(period − slack)` is a fair metric across periods,
+and measuring at a realistic target costs nothing in fidelity.
+
+**The cell saving is entirely optimizer thrash.** −10,644 stdcells against −10,437
+timing-repair buffers: the same cells. Half the power and 2% fewer cells for the
+same speed, purely from not asking the tool to hit a target the design cannot
+reach. This is the "set the target from measured slack" heuristic paying off, and
+it is a HARNESS-level gain — no RTL was involved.
+
+**Known bias, stated:** the period is held at 2.80 ns for all Y in X1 so the rows
+are one variable apart. A Y that closes with large *positive* slack will therefore
+have its fmax **understated**, because the optimizer stops once it meets the
+target. That biases against a successful Y, so a reported gain is a lower bound —
+acceptable. A winning Y deserves a follow-up run at a tighter period to find its
+actual limit, and that is a new X, not another Y.
+
+### X1-Y1, first attempt — FAILED, and it was the HARNESS, not the design
+
+`trials.jsonl` carries an `X1-Y1 result=FAIL` record with no metrics. That record
+is true — the trial did fail — but under the X-Y rule a Y failure implicates the
+**design**, and this one did not. It was tooling, and conflating the two would
+corrupt the only diagnostic this scheme has.
+
+**What happened.** `PIPE` was added to the RTL, to the testbench, to `SIM_PARAMS`
+and to the Makefile — but **not to `TOP_PARAMS`**. So `measure.sh` gated on a
+simulation of `PIPE=1` and then handed synthesis `VERILOG_TOP_PARAMS = SAT 1`,
+building `PIPE=0`. The trial was measuring a duplicate of its own baseline while
+preparing to log it as `PIPE=1`.
+
+**How it was caught.** Not by the flow, which was perfectly happy. By checking the
+synthesised flop count against the prediction: `PIPE=1` must add 4,608 flops
+(18 bits × 256 accumulators) and the netlist showed **+1**. The arithmetic not
+matching is what exposed it. Had the prediction not been written down first, a
+duplicate row would have entered the log as a pipelining result.
+
+**The irony, recorded deliberately.** `measure.sh` already carried this comment:
+
+> Every parameter that changes the hardware must be passed here too. Gating on a
+> simulation of a DIFFERENT configuration than the one being synthesised would
+> make the gate decorative.
+
+The warning was right, sat directly above the code, and did not prevent the bug.
+**A comment is not a check.**
+
+**The structural fix**, not just patching the two call sites: `measure.sh` now
+cross-checks that every `-Ptb_*.NAME=VALUE` given to the sim gate appears with the
+same value in `TOP_PARAMS`, and aborts if not. Verified to fire on exactly this
+bug and to pass for both designs. Any future parameter added to a testbench but
+forgotten in the synthesis parameters is now a hard failure rather than a silently
+wrong row.
+
+**Second-order lesson for the harness itself:** the per-trial record should assert
+the prediction where one exists. Y1 predicted +4,608 flops; the flop count was
+already being logged; nothing compared them. Cheap to add, and it would have
+failed the trial in seconds instead of costing 17 minutes of routing.

@@ -95,7 +95,8 @@ set +e
 ORFS="$(sed -n 's/^ORFS *:= *//p' "$HERE/local.mk")" \
 YOSYS_EXE="$(sed -n 's/^YOSYS_EXE *:= *//p' "$HERE/local.mk")" \
 KLAYOUT_CMD="$(sed -n 's/^KLAYOUT_CMD *:= *//p' "$HERE/local.mk")" \
-  "$HERE/scripts/measure.sh" -d "$DESIGN" -s "$SAT" -p "$PERIOD" -u "$UTIL" \
+  "$HERE/scripts/measure.sh" -d "$DESIGN" -s "$SAT" -P "$PIPE" \
+    -p "$PERIOD" -u "$UTIL" \
     -t "$TAG" ${HOLD_MARGIN:+--hold-margin "$HOLD_MARGIN"}
 RC=$?
 set -e
