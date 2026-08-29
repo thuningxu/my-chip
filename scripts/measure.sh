@@ -9,8 +9,9 @@
 # so the gate has to be here.
 #
 # Usage:
-#   scripts/measure.sh [-n N] [-c C_PORT] [-r OUT_PAR] [-p PERIOD_NS] [-u UTIL]
-#                      [-t TAG] [--no-sim]
+#   scripts/measure.sh [-d DESIGN] [-n N] [-c C_PORT] [-r OUT_PAR] [-s SAT]
+#                      [-p PERIOD_NS] [-u UTIL] [-t TAG] [--hold-margin NS]
+#                      [--no-sim]
 #
 # Env:
 #   ORFS        path to OpenROAD-flow-scripts   (default: ~/sd/OpenROAD-flow-scripts)
@@ -31,6 +32,9 @@ PERIOD=1.00
 UTIL=40
 TAG=""
 RUN_SIM=1
+# Empty means "do not set it", which preserves every previously measured row
+# exactly. Only set it deliberately, and record the value with the row.
+HOLD_MARGIN=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     -p) PERIOD="$2"; shift 2 ;;
     -u) UTIL="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
+    --hold-margin) HOLD_MARGIN="$2"; shift 2 ;;
     --no-sim) RUN_SIM=0; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -145,7 +150,7 @@ for f in "$CFG_DIR/config.mk" "$CFG_DIR/constraint.sdc"; do
 done
 
 # ---------------------------------------------------------------- 3. run flow
-echo "== running ORFS ($DESIGN, $CFG_DESC, period=${PERIOD}ns, util=$UTIL) =="
+echo "== running ORFS ($DESIGN, $CFG_DESC, period=${PERIOD}ns, util=$UTIL${HOLD_MARGIN:+, hold_margin=${HOLD_MARGIN}ns}) =="
 # WORK_HOME/DESIGN_HOME redirect every output away from the ORFS tree.
 # DESIGN_CONFIG must be absolute since it is no longer under $ORFS/flow.
 MAKE_ARGS=(
@@ -155,6 +160,10 @@ MAKE_ARGS=(
 )
 [[ -n "${YOSYS_EXE:-}"   ]] && MAKE_ARGS+=("YOSYS_EXE=$YOSYS_EXE")
 [[ -n "${KLAYOUT_CMD:-}" ]] && MAKE_ARGS+=("KLAYOUT_CMD=$KLAYOUT_CMD")
+# Passed on ORFS's make command line so it overrides config.mk without editing
+# the committed template -- which keeps every row measured before this flag
+# existed byte-for-byte reproducible.
+[[ -n "$HOLD_MARGIN"    ]] && MAKE_ARGS+=("HOLD_SLACK_MARGIN=$HOLD_MARGIN")
 
 mkdir -p "$WORK/logs"
 LOG="$WORK/logs/${NICK}_flow.log"

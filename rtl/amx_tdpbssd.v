@@ -95,7 +95,21 @@
 module amx_tdpbssd #(
     // 0 = wrap (bit-exact Intel). 1 = saturate to INT32 (the deviation).
     // At SAT=0 the overflow detect and the rail muxes fold away entirely.
-    parameter integer SAT = 1
+    parameter integer SAT = 1,
+    // Pipeline depth in the FEED-FORWARD chain. Latency becomes 17+PIPE cycles;
+    // throughput is unchanged at one k-step per cycle.
+    //
+    //   0  nothing registered. kcnt -> mux -> multiply -> tree -> add -> fold
+    //      is ONE combinational path. Measured at 2.817 ns (row a1).
+    //   1  register sum4.     Cuts mux+multiply+tree out of the accumulate path.
+    //   2  also register prod[]. Splits the multiply from the adder tree.
+    //   3  also register the selected operands. Splits the mux from the multiply.
+    //
+    // WHAT PIPELINING CANNOT REACH: the accumulate is a FEEDBACK loop,
+    // cacc -> 33-bit add -> fold -> cacc, and no amount of PIPE shortens it.
+    // That loop is the floor. Flop cost is not uniform either -- see the
+    // per-level comments at the registers themselves.
+    parameter integer PIPE = 0
 )(
     input  wire         clk,
     input  wire         rst_n,
@@ -154,16 +168,33 @@ module amx_tdpbssd #(
     reg [ACC_W-1:0] cacc [0:ROWS-1][0:DWORDS-1];
 
     reg [1:0]            state;
-    reg [3:0]            kcnt;      // the k-step, 0..15
+    // Counts CYCLES in S_RUN, not k-steps: with PIPE>0 the state must persist
+    // KDW+PIPE cycles so the last operands can drain through to an accumulator.
+    // Needs 5 bits because KDW+PIPE-1 reaches 18 at PIPE=3.
+    reg [4:0]            ccnt;
 
     // ---- control ------------------------------------------------------------
     wire run    = (state == S_RUN);
-    wire k_last = (kcnt == (KDW-1));
+    // The operand-select index. Only meaningful while sel_valid; during the
+    // PIPE flush cycles it keeps counting and selects data nobody accumulates.
+    wire [3:0] kcnt      = ccnt[3:0];
+    wire       sel_valid = run && (ccnt < KDW);
+    wire       c_last    = (ccnt == (KDW + PIPE - 1));
+
+    // sel_valid delayed, so an accumulator is enabled exactly when ITS operands
+    // arrive -- 16 pulses, PIPE cycles late. Gating on `run` instead would
+    // accumulate during the flush and corrupt the last k-steps.
+    reg [3:0] v_sr;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) v_sr <= 4'd0;
+        else        v_sr <= {v_sr[2:0], sel_valid};
+    end
+    wire acc_en = (PIPE == 0) ? sel_valid : v_sr[PIPE-1];
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state <= S_IDLE;
-            kcnt  <= 4'd0;
+            ccnt  <= 5'd0;
             busy  <= 1'b0;
             done  <= 1'b0;
         end else begin
@@ -174,18 +205,18 @@ module amx_tdpbssd #(
                     // back-to-back instructions work without a reset, which is
                     // the whole point of a C += chain. See tb case C1.
                     if (start) begin
-                        kcnt  <= 4'd0;
+                        ccnt  <= 5'd0;
                         busy  <= 1'b1;
                         state <= S_RUN;
                     end
                 end
                 S_RUN: begin
-                    if (k_last) begin
+                    if (c_last) begin
                         state <= S_IDLE;
                         busy  <= 1'b0;
                         done  <= 1'b1;
                     end else begin
-                        kcnt <= kcnt + 4'd1;
+                        ccnt <= ccnt + 5'd1;
                     end
                 end
                 default: state <= S_IDLE;
@@ -206,7 +237,20 @@ module amx_tdpbssd #(
     // ---- operand fetch for this k-step -------------------------------------
     // One 16:1 mux over 512 bits for B, and one 16:1 mux over 32 bits per row
     // of A. This is the entire cost of holding the tiles in registers.
-    wire [511:0] b_row = b_flat[kcnt*512 +: 512];
+    // PIPE>=3 registers the SELECTED operands, splitting the 16:1 mux off the
+    // front of the multiply. Cheapest cut in the whole ladder: 512 bits for
+    // b_row plus 16x32 for the A dwords = 1024 flops.
+    wire [511:0] b_row_c = b_flat[kcnt*512 +: 512];
+    wire [511:0] b_row;
+    generate
+        if (PIPE >= 3) begin : g_brow_reg
+            reg [511:0] b_row_r;
+            always @(posedge clk) b_row_r <= b_row_c;
+            assign b_row = b_row_r;
+        end else begin : g_brow_comb
+            assign b_row = b_row_c;
+        end
+    endgenerate
 
     // ---- the 1024 multipliers ----------------------------------------------
     genvar gm, gn, gb;
@@ -215,7 +259,15 @@ module amx_tdpbssd #(
             // dword k of A row gm. kcnt is a variable base, gm a constant index.
             // gm is a genvar (constant), kcnt a register: constant row offset
             // plus a variable dword offset into the flat tile.
-            wire [31:0] a_dw = a_flat[gm*512 + kcnt*32 +: 32];
+            wire [31:0] a_dw_c = a_flat[gm*512 + kcnt*32 +: 32];
+            wire [31:0] a_dw;
+            if (PIPE >= 3) begin : g_adw_reg
+                reg [31:0] a_dw_r;
+                always @(posedge clk) a_dw_r <= a_dw_c;
+                assign a_dw = a_dw_r;
+            end else begin : g_adw_comb
+                assign a_dw = a_dw_c;
+            end
 
             for (gn = 0; gn < DWORDS; gn = gn + 1) begin : g_n
                 wire [31:0] b_dw = b_row[gn*32 +: 32];
@@ -232,13 +284,42 @@ module amx_tdpbssd #(
                     assign prod[gb] = a_b * b_b;
                 end
 
+                // PIPE>=2 registers the four products, splitting the multiply
+                // from the adder tree. MOST EXPENSIVE cut in the ladder:
+                // 4 x 16 bits x 256 units = 16,384 flops, which is two thirds of
+                // the entire tile register file. Measure before believing it is
+                // worth it.
+                wire signed [15:0] prod_e [0:3];
+                for (gb = 0; gb < 4; gb = gb + 1) begin : g_pr
+                    if (PIPE >= 2) begin : g_reg
+                        reg signed [15:0] pr;
+                        always @(posedge clk) pr <= prod[gb];
+                        assign prod_e[gb] = pr;
+                    end else begin : g_comb
+                        assign prod_e[gb] = prod[gb];
+                    end
+                end
+
                 // 18 bits is exact: four products in [-16256,+16384] cannot
                 // leave [-65024,+65536]. No fold needed here.
-                wire signed [17:0] sum4 = prod[0] + prod[1] + prod[2] + prod[3];
+                wire signed [17:0] sum4 = prod_e[0] + prod_e[1]
+                                        + prod_e[2] + prod_e[3];
+
+                // PIPE>=1 registers sum4. This is the cut that matters: it takes
+                // the mux, the multiply AND the tree out of the accumulate loop's
+                // path in one move, for 18 bits x 256 units = 4,608 flops.
+                wire signed [17:0] sum4_e;
+                if (PIPE >= 1) begin : g_sum4_reg
+                    reg signed [17:0] s4r;
+                    always @(posedge clk) s4r <= sum4;
+                    assign sum4_e = s4r;
+                end else begin : g_sum4_comb
+                    assign sum4_e = sum4;
+                end
 
                 // 33 bits so the 32-bit overflow is visible rather than lost.
                 wire signed [ACC_W-1:0] c_cur = cacc[gm][gn];
-                wire signed [ACC_W:0]   raw   = c_cur + sum4;
+                wire signed [ACC_W:0]   raw   = c_cur + sum4_e;
 
                 // Overflow of the INT32 range, from the top two bits: for a
                 // 33-bit sum of two 32-bit signed values, raw[32] != raw[31]
@@ -258,7 +339,7 @@ module amx_tdpbssd #(
                 always @(posedge clk) begin
                     if (tile_we && tile_sel == SEL_C && tile_row == gm)
                         cacc[gm][gn] <= tile_wdata[gn*32 +: 32];
-                    else if (run)
+                    else if (acc_en)
                         cacc[gm][gn] <= folded;
                 end
             end
@@ -285,6 +366,10 @@ module amx_tdpbssd #(
 
     // ---- elaboration-time checks -------------------------------------------
     initial begin
+        if (PIPE < 0 || PIPE > 3) begin
+            $display("FATAL: PIPE must be 0..3 (got %0d)", PIPE);
+            $finish;
+        end
         if (SAT != 0 && SAT != 1) begin
             $display("FATAL: SAT must be 0 or 1 (got %0d)", SAT);
             $finish;

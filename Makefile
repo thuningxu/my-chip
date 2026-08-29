@@ -36,6 +36,11 @@ DESIGN ?= mac_array
 # INT32, which is a deliberate deviation. Both are built and measured.
 SAT    ?= 1
 
+# amx_tdpbssd feed-forward pipeline depth, 0..3. Latency is 17+PIPE cycles;
+# throughput is one k-step per cycle regardless. The accumulate is a feedback
+# loop and no PIPE level shortens it -- see experiments/harness.md, X1.
+PIPE   ?= 0
+
 -include local.mk
 
 IVERILOG ?= iverilog
@@ -56,7 +61,7 @@ help:
 	@echo "  make check           check dependencies only, install nothing"
 	@echo ""
 	@echo "  make sim             run the regression            (N=$(N))"
-	@echo "  make sim-amx         AMX TDPBSSD regression        (SAT=$(SAT))"
+	@echo "  make sim-amx         AMX TDPBSSD regression   (SAT=$(SAT) PIPE=$(PIPE))"
 	@echo "  make sim-matrix      both designs, all parameter states (14 configs)"
 	@echo "  make sim-all         run the regression at N=4,8,16"
 	@echo "  make golden          run the Python reference model"
@@ -134,23 +139,24 @@ sim-matrix:
 	    && echo "  PASS  mac_array   N=$$n CPORT=$$c OUTPAR=$$r" \
 	    || { echo "  FAIL  mac_array   N=$$n CPORT=$$c OUTPAR=$$r"; exit 1; }; \
 	done; done; done
-	@for s in 0 1; do \
-	  $(MAKE) --no-print-directory sim-amx SAT=$$s >/dev/null \
-	    && echo "  PASS  amx_tdpbssd SAT=$$s" \
-	    || { echo "  FAIL  amx_tdpbssd SAT=$$s"; exit 1; }; \
-	done
-	@echo "== all 14 configurations PASS =="
+	@for s in 0 1; do for p in 0 1 2 3; do \
+	  $(MAKE) --no-print-directory sim-amx SAT=$$s PIPE=$$p >/dev/null \
+	    && echo "  PASS  amx_tdpbssd SAT=$$s PIPE=$$p" \
+	    || { echo "  FAIL  amx_tdpbssd SAT=$$s PIPE=$$p"; exit 1; }; \
+	done; done
+	@echo "== all 20 configurations PASS =="
 
 .PHONY: sim-amx
 # The AMX regression. Separate target rather than a DESIGN switch on `sim`,
 # because the two testbenches take different parameters and silently accepting
 # N= for a design that has no N would be worse than refusing it.
 sim-amx: $(BUILD)
-	@echo "== AMX TDPBSSD regression SAT=$(SAT) =="
-	@$(IVERILOG) -g2005 -o $(BUILD)/tb_amx_s$(SAT).vvp \
-	  -Ptb_amx_tdpbssd.SAT=$(SAT) tb/tb_amx_tdpbssd.v rtl/amx_tdpbssd.v
-	@vvp $(BUILD)/tb_amx_s$(SAT).vvp | tee $(BUILD)/sim_amx_s$(SAT).log
-	@grep -q '^RESULT: PASS' $(BUILD)/sim_amx_s$(SAT).log \
+	@echo "== AMX TDPBSSD regression SAT=$(SAT) PIPE=$(PIPE) =="
+	@$(IVERILOG) -g2005 -o $(BUILD)/tb_amx_s$(SAT)_p$(PIPE).vvp \
+	  -Ptb_amx_tdpbssd.SAT=$(SAT) -Ptb_amx_tdpbssd.PIPE=$(PIPE) \
+	  tb/tb_amx_tdpbssd.v rtl/amx_tdpbssd.v
+	@vvp $(BUILD)/tb_amx_s$(SAT)_p$(PIPE).vvp | tee $(BUILD)/sim_amx_s$(SAT)_p$(PIPE).log
+	@grep -q '^RESULT: PASS' $(BUILD)/sim_amx_s$(SAT)_p$(PIPE).log \
 	  || { echo "AMX regression FAILED"; exit 1; }
 
 .PHONY: golden

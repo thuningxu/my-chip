@@ -37,6 +37,18 @@
 //   S5 no-overflow       -- SAT=0 and SAT=1 must agree bit-for-bit when nothing
 //                           overflows, which is always true for one instruction
 //                           from C=0 (max |acc| = 1,048,576, 21 bits).
+//   S6 fold ORDER        -- THE case that makes the k-SEQUENCE observable, not
+//                           merely the fold's existence. sum4 is +4 for k=0..7
+//                           then -4 for k=8..15, with C starting 10 below the
+//                           rail, so the accumulator clamps partway through and
+//                           then walks back down. Correct order lands on
+//                           INT32_MAX-32; ANY permutation of k lands elsewhere
+//                           (rotating by one gives -28). Added because a real
+//                           mutation survived everything else -- see below.
+//
+// check_settled() also runs after every case: C must not move over 6 idle cycles
+// after `done`. readback is combinational and happens before any further clock
+// edge, so without this a design that keeps accumulating past `done` is invisible.
 //
 // Cycle count is ASSERTED, not printed: 16 k-steps plus fixed overhead. An
 // implementation that computed the right answer in more cycles would otherwise
@@ -49,8 +61,10 @@
 //   transpose the accumulator index     5 fail       5 fail    T3, T5, S5, C1
 //   read A's byte lanes unsigned        6 fail       7 fail    T3, T4, T5, S5
 //   ovf = raw[32] (not raw[32]^[31])    SURVIVES     7 fail    S2, S4, T3, T5
+//   acc_en delayed one cycle too far    SURVIVES     2 fail    S6 ONLY
+//   accumulate gated on run, not acc_en 14 fail     12 fail    nearly everything
 //
-// Two findings worth keeping:
+// Three findings worth keeping:
 //
 // 1. T1, T2 and T4 all PASS the byte-reversal mutant. Uniform tiles cannot
 //    detect a reordering, and T4's pattern happens to be period-2 in b so its
@@ -62,11 +76,28 @@
 //    fold is `((SAT != 0) && ovf) ? rail : raw[31:0]`, so at SAT=0 `ovf` is dead
 //    logic and the parameter prunes it. A mutation in pruned hardware has
 //    nothing to detect.
+//
+// 3. THE acc_en MUTANT EXPOSED A REAL HOLE, and S6 exists because of it. Delaying
+//    the accumulate enable by one cycle does not DROP a k-step, it PERMUTES the
+//    sequence (k=1..15 then k=0, the last landing in an idle cycle). Every test
+//    here was blind to that:
+//      - SAT=0 can NEVER see it -- wrapping addition is associative and
+//        commutative, so a permutation is not merely undetected but undetectable.
+//      - S1..S4 could not see it -- they use UNIFORM operands, and permuting
+//        equal values changes nothing.
+//      - The T-series could not see it -- C=0 and one instruction cannot overflow,
+//        so no clamp ever occurs and order is irrelevant.
+//    The suite tested that the fold HAPPENS and never that it happens in the
+//    right ORDER, while the order is the specification. S6 is the fix, and it
+//    catches the mutant at SAT=1 with exactly the predicted value.
 //=============================================================================
 module tb_amx_tdpbssd;
 
     // parameter, not localparam, so measure.sh can pass -Ptb_amx_tdpbssd.SAT=
     parameter integer SAT = 1;
+    // Feed-forward pipeline depth. Adds latency, NOT cycles per k-step, so the
+    // cycle model gains exactly PIPE.
+    parameter integer PIPE = 0;
 
     localparam integer ROWS   = 16;
     localparam integer COLSB  = 64;
@@ -79,7 +110,7 @@ module tb_amx_tdpbssd;
 
     // Expected cycles from start edge to done. 16 k-steps plus the IDLE->RUN
     // transition; `done` is observed the cycle after the last k-step.
-    localparam integer EXP_CYC = KDW + 1;
+    localparam integer EXP_CYC = KDW + 1 + PIPE;
 
     reg          clk = 1'b0;
     reg          rst_n = 1'b0;
@@ -93,7 +124,7 @@ module tb_amx_tdpbssd;
     reg  [3:0]   rd_row = 4'd0;
     wire [511:0] rd_data;
 
-    amx_tdpbssd #(.SAT(SAT)) dut (
+    amx_tdpbssd #(.SAT(SAT), .PIPE(PIPE)) dut (
         .clk(clk), .rst_n(rst_n),
         .tile_we(tile_we), .tile_sel(tile_sel), .tile_row(tile_row),
         .tile_wdata(tile_wdata),
@@ -311,7 +342,31 @@ module tb_amx_tdpbssd;
         end
     endtask
 
-    // one full operation: pack, load, model, run, read, compare
+    // C must be STABLE after done. Without this, a design that keeps accumulating
+    // past `done` passes silently, because readback is combinational and happens
+    // before any further clock edge. Found by mutation: delaying the accumulate
+    // enable one cycle too many was INVISIBLE to every other check in this file.
+    task check_settled(input [8*28:1] name);
+        integer m, n, moved;
+        reg signed [ACC_W-1:0] before [0:ROWS-1][0:DWORDS-1];
+        begin
+            for (m = 0; m < ROWS; m = m + 1)
+                for (n = 0; n < DWORDS; n = n + 1) before[m][n] = got[m][n];
+            repeat (6) @(posedge clk);      // well past any PIPE flush
+            readback;
+            moved = 0;
+            for (m = 0; m < ROWS; m = m + 1)
+                for (n = 0; n < DWORDS; n = n + 1)
+                    if (got[m][n] !== before[m][n]) moved = moved + 1;
+            if (moved != 0) begin
+                $display("  [FAIL] %0s : C MOVED after done -- %0d accumulators changed over 6 idle cycles",
+                         name, moved);
+                fail_count = fail_count + 1;
+            end
+        end
+    endtask
+
+    // one full operation: pack, load, model, run, read, compare, prove settled
     task do_case(input [8*28:1] name);
         begin
             pack_tiles;
@@ -321,6 +376,7 @@ module tb_amx_tdpbssd;
             run_op;
             readback;
             check(name);
+            check_settled(name);
             repeat (2) @(posedge clk);
         end
     endtask
@@ -378,6 +434,20 @@ module tb_amx_tdpbssd;
         end
     endtask
 
+    // sum4(k) = +4 for k=0..7 and -4 for k=8..15. THE point is that it varies
+    // with k: every other saturation case here uses uniform operands, and a
+    // permutation of equal values is undetectable by construction.
+    task fill_sign_flip_over_k;
+        integer m, n, k;
+        begin
+            for (m = 0; m < ROWS; m = m + 1)
+                for (k = 0; k < KLOG; k = k + 1)
+                    a_log[m][k] = (k < (KLOG/2)) ? 8'sd1 : -8'sd1;
+            for (k = 0; k < KLOG; k = k + 1)
+                for (n = 0; n < DWORDS; n = n + 1) b_log[k][n] = 8'sd1;
+        end
+    endtask
+
     task set_c_const(input signed [ACC_W-1:0] v);
         integer m, n;
         begin
@@ -418,9 +488,10 @@ module tb_amx_tdpbssd;
     // ---- stimulus ----------------------------------------------------------
     integer m_i, n_i;
     reg signed [ACC_W-1:0] snap [0:ROWS-1][0:DWORDS-1];
+    reg signed [ACC_W-1:0] s6_want;
 
     initial begin
-        $display("=== tb_amx_tdpbssd : TDPBSSD 16x64 @ 64x16 -> 16x16, SAT=%0d ===", SAT);
+        $display("=== tb_amx_tdpbssd : TDPBSSD 16x64 @ 64x16 -> 16x16, SAT=%0d PIPE=%0d ===", SAT, PIPE);
         $display("    %0d INT8 MACs per instruction, %0d multipliers, %0d k-steps",
                  ROWS*DWORDS*KLOG, ROWS*DWORDS*4, KDW);
 
@@ -488,6 +559,38 @@ module tb_amx_tdpbssd;
         // SAT must be a no-op when nothing can overflow.
         set_c_const(0);
         fill_random(32'hFEED_BEEF);      do_case("S5 no overflow possible");
+
+        // S6 -- FOLD ORDER, not just fold existence. THE case that makes the
+        // k-sequence observable. sum4 is +4 for k=0..7 then -4 for k=8..15, and C
+        // starts 10 below the rail, so the accumulator clamps partway through and
+        // then walks back down. Any PERMUTATION of the k order lands somewhere
+        // else: correct is INT32_MAX-32, while rotating k by one gives MAX-28.
+        //
+        // Found necessary by mutation. Delaying the accumulate enable by one
+        // cycle permutes the sequence, and S1-S4 could not see it because they
+        // use uniform operands, while SAT=0 can NEVER see it because wrapping
+        // addition is associative. Without this case, pipelining could silently
+        // reorder the fold and every other test would still pass.
+        set_c_const(32'h7FFF_FFFF - 32'sd10);
+        fill_sign_flip_over_k;           do_case("S6 fold ORDER, mixed sign");
+        // Both modes get a hardcoded expectation, and they differ for a reason:
+        //   SAT=1  clamps partway, so the +32 is partly lost and it ends MAX-32.
+        //          A permutation of k lands on MAX-28 instead. THE order check.
+        //   SAT=0  never clamps, the +32 and -32 cancel exactly, so it must come
+        //          back to MAX-10. That also proves no spurious clamp occurred.
+        s6_want = (SAT != 0) ? (32'h7FFF_FFFF - 32'sd32)
+                             : (32'h7FFF_FFFF - 32'sd10);
+        if (got[0][0] !== s6_want) begin
+            $display("  [FAIL] S6 : C[0][0]=%0d, expected %0d (SAT=%0d) -- k-fold order or clamping is wrong",
+                     got[0][0], s6_want, SAT);
+            fail_count = fail_count + 1;
+        end else if (SAT != 0) begin
+            $display("  [PASS] S6 fold ORDER lands on INT32_MAX-32 (any k permutation gives -28)");
+            pass_count = pass_count + 1;
+        end else begin
+            $display("  [PASS] S6 SAT=0 never clamps: +32 and -32 cancel back to INT32_MAX-10");
+            pass_count = pass_count + 1;
+        end
 
         $display("=== %0d passed, %0d failed ===", pass_count, fail_count);
         if (fail_count != 0) $display("RESULT: FAIL");
