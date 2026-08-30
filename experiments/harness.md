@@ -300,3 +300,52 @@ Wire is still untouched — 9 of the ~34 cells on Y1's worst path are buffers.
 **X2-Y0 is the same RTL as X1-Y1.** If its fmax is materially higher, that alone
 proves X1's row was measurement-limited rather than design-limited — and it costs
 one run to know.
+
+### X2-Y0 result — X1's row was measurement-limited, and the cost was a 15% gain
+
+Same RTL as X1-Y1. Only the target moved.
+
+| trial | PIPE | target | setup WS | needs | fmax | cells | area µm² | skew | TNS |
+|---|---|---|---|---|---|---|---|---|---|
+| X1-Y0 | 0 | 2.80 | −0.0565 | 2.857 | 350.1 | 509,176 | 1,086,640 | 0.1727 | −36.0 |
+| X1-Y1 | 1 | 2.80 | −0.0539 | 2.854 | 350.4 | 457,390 | 920,220 | 0.2547 | −0.8 |
+| **X2-Y0** | **1** | **2.00** | −0.4702 | 2.470 | **404.8** | 492,398 | 971,277 | 0.2140 | −1067.8 |
+
+**`PIPE=1` is worth +54.7 MHz (+15.6%). X1 reported it as +0.3 MHz.**
+
+The comparison is fair, and it is worth saying why rather than assuming it:
+`PIPE=0` at 2.80 had TNS −36.0 across 2,812 straining endpoints, so it was *not*
+saturated — 350.1 really is its limit. Independently, a1 measured `PIPE=0` at a
+1.00 ns target and got 355 MHz. Two targets 2.8× apart agree, so the `PIPE=0`
+baseline is solid and the +15.6% is real.
+
+**TNS behaved exactly as X2 designed it to.** −0.8 when saturated, **−1067.8** when
+the tool is actually working. That is the signal X1 lacked, and it is what
+distinguishes "the design cannot go faster" from "nobody asked it to".
+
+**The speed/area curve for one RTL.** X1-Y1 and X2-Y0 are the same Verilog:
+350 MHz for 457k cells, or 405 MHz for 492k. ~55 MHz of headroom costs ~35k cells.
+Neither number is "the" answer — which is the deeper reason a fixed period per
+generation was the wrong procedure.
+
+**Hold survived the tighter target** (+0.0227, 0 violations, down from +0.0402).
+Worth noting because it was a live risk: tightening setup makes the tool size cells
+up, which shortens min-delay paths.
+
+### Correction: the FLW-0009 shift is NOT a constant
+
+Earlier this file claimed "consistently ~−0.032 ns on the large die". That was
+fitted to two points and the third breaks it:
+
+| design | die | FLW-0009 | routed | shift |
+|---|---|---|---|---|
+| `mac_array` f2b | 156 µm | −0.2590 | −0.2581 | +0.0009 |
+| `amx` a1 | 1555 µm | −1.7850 | −1.8171 | −0.0321 |
+| `amx` X1-Y0 | 1554 µm | −0.0240 | −0.0565 | −0.0325 |
+| `amx` X2-Y0 | 1554 µm | −0.4630 | −0.4702 | **−0.0072** |
+
+The shift ranges 0 to −0.033. **FLW-0009 is an upper bound on the final slack, not
+a value with a fixed offset.** The 401 MHz predicted for X2-Y0 against 404.8 actual
+was right in direction and close in magnitude, but for an over-fitted reason —
+recorded because a calibration believed too precisely is how the next wrong
+confident number gets made.
