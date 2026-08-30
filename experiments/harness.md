@@ -240,3 +240,63 @@ supported by a second, unrelated measurement.
 
 Practical consequence for reading the X1 row: only a **large** Y step means
 anything. A 5 MHz move is not a result.
+
+---
+
+## X2 — "X1's fix family was right; its MEASUREMENT was blind"
+
+X1 is not being abandoned because its fix family failed. The path report proves the
+family worked. X1 is being superseded because **its measurement procedure could not
+see its own Y's effect**, which is a harness fault by definition.
+
+### The evidence that X1's procedure was blind
+
+X1-Y1's worst path, post-route:
+
+```
+Startpoint: ccnt[1]$_DFFE_PN0P_
+Endpoint:   g_m[13].g_n[2].g_sum4_reg.s4r[17]$_DFF_P_
+arrival 3.394   required 3.340   slack -0.054
+```
+
+It ends at **`s4r`** — the register `PIPE=1` created. So the accumulate loop is no
+longer critical and X1's declared floor was never reached. The feed-forward stage
+is still the longest, which is exactly what `PIPE=2` targets.
+
+But WNS is unchanged from Y0 (−0.054 vs −0.057) for a path that is *logically
+shorter*. The tool simply relaxed it: TNS −35.958 → −0.763, violating endpoints
+2,812 → 41, and 51,786 buffer cells it therefore never inserted. **A fixed period
+across a ladder that changes the design's speed measures the target, not the
+design.**
+
+### What changes (this is the harness delta)
+
+| | X1 | X2 |
+|---|---|---|
+| period | **fixed** at 2.80 for the whole generation, from the a1 baseline | **derived per trial** from the previous trial's measured need |
+| saturation check | none — relied on slack going positive, which never happened | **read TNS and violating-endpoint count.** TNS collapsing at unchanged WNS *is* the saturation signal |
+| clock cost | not tracked | **track `clock__skew__setup`.** Pipelining added 4,610 flops → 1,170 clock buffers → skew +0.082 ns. Pipelining trades logic delay for skew, and that must be visible |
+
+Reports read, bottleneck blamed and fix family are otherwise **unchanged from X1** —
+the path report says they were correct.
+
+### What X2 CANNOT reach
+
+Fixed per-cycle overhead is now a hard floor: **skew 0.2547 + SDC uncertainty
+0.100 + setup ≈ 0.04 = ~0.39 ns**, and skew *grows* with every pipeline stage
+because each adds flops to the clock tree. So the ladder is self-limiting in a way
+X1 did not anticipate: each `PIPE` step buys logic delay and spends skew.
+
+Wire is still untouched — 9 of the ~34 cells on Y1's worst path are buffers.
+
+### Y ladder
+
+| Y | RTL | period | purpose |
+|---|---|---|---|
+| Y0 | `PIPE=1` (X1's best) | **2.00 ns** | re-baseline the SAME RTL at a target that does not hide it. ~30% tighter; if it closes easily, tighten again |
+| Y1 | `PIPE=2` | from Y0's need | register `prod[]` — splits multiply from tree. +16,384 flops, the expensive cut |
+| Y2 | `PIPE=3` | from Y1's need | register the operands — splits the mux off the front. +1,024 flops |
+
+**X2-Y0 is the same RTL as X1-Y1.** If its fmax is materially higher, that alone
+proves X1's row was measurement-limited rather than design-limited — and it costs
+one run to know.
