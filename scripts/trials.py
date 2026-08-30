@@ -54,6 +54,49 @@ def fmt(v, spec="%s"):
     return "-" if v is None else spec % v
 
 
+def ladder(trials):
+    """Cost per unit gain, grouped by RTL VARIANT (PIPE), not by trial.
+
+    Per-trial was wrong and the output said so: it split PIPE=1's gain across two
+    rows -- "+0.3 MHz for +4,610 flops" at the saturated 2.80 ns target, then
+    "+54.4 MHz for +0 flops" when the same RTL was re-measured at 2.00 -- making
+    one change look worthless and then free. Neither is true.
+
+    A trial measures an (RTL, target) pair. Only the BEST target per RTL reveals
+    what that RTL can do, so the ladder takes the max fmax per PIPE level and
+    compares consecutive levels. That is the number which answers the question the
+    ladder exists for: is the next pipeline stage worth its flops.
+    """
+    ok = [t for t in trials if t.get("metrics")]
+    if len(ok) < 2:
+        return
+    best = {}
+    for t in ok:
+        p = t["knobs"]["PIPE"]
+        if p not in best or t["metrics"]["implied_fmax_mhz"] > best[p]["metrics"]["implied_fmax_mhz"]:
+            best[p] = t
+    print("Ladder economics, best result per RTL variant\n")
+    print("  %-5s %-8s %-9s %-9s %-8s %-9s %s"
+          % ("PIPE", "best at", "fmax MHz", "d fmax", "flops", "d flops",
+             "MHz per 1k flops"))
+    prev = None
+    for p in sorted(best):
+        t = best[p]; m = t["metrics"]
+        f, ff = m["implied_fmax_mhz"], m["flipflops"]
+        df = dff = None
+        if prev:
+            df, dff = f - prev[0], ff - prev[1]
+        eff = "%+.2f" % (df / (dff / 1000.0)) if (df is not None and dff) else ""
+        print("  %-5d %-8s %-9.1f %-9s %-8d %-9s %s"
+              % (p, "X%dY%d" % (t["x"], t["y"]), f, fmt(df, "%+.1f"), ff,
+                 fmt(dff, "%+d"), eff))
+        prev = (f, ff)
+    print()
+    print("  Only the best target per variant is used: a trial measures an")
+    print("  (RTL, target) pair, and a saturated target measures the target.")
+    print()
+
+
 def grid(trials, metric):
     xs = sorted({t["x"] for t in trials})
     print("X-Y grid  (metric: %s, headline: implied_fmax_mhz)\n" % metric)
@@ -124,6 +167,7 @@ def main():
         full(trials)
     else:
         grid(trials, a.metric)
+        ladder(trials)
     print("  %d trial(s) in %s" % (len(trials), os.path.relpath(JSONL, HERE)))
 
 
