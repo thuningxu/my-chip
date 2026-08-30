@@ -38,6 +38,7 @@ SAT=1; PIPE=0; PERIOD=2.80; UTIL=40; HOLD_MARGIN=""
 # the flop count was logged and never compared to what the change had to add.
 EXPECT_FF=""
 DRY=0
+LOG_ONLY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -52,6 +53,13 @@ while [[ $# -gt 0 ]]; do
     --hold-margin) HOLD_MARGIN="$2"; shift 2 ;;
     --expect-flops) EXPECT_FF="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
+    # Log from artifacts already on disk, skipping the flow. For when the flow
+    # SUCCEEDED but the logging step did not -- which happened once, because this
+    # script was edited while it was running and bash, which reads scripts
+    # incrementally, resumed from a shifted offset. Re-running 30 minutes of
+    # routing to recover a record that is already sitting in 6_report.json would
+    # be silly. NEVER edit a running script.
+    --log-only) LOG_ONLY=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -96,6 +104,10 @@ echo "=============================================================="
 if [[ $DRY -eq 1 ]]; then echo "(dry run -- not executing)"; exit 0; fi
 
 START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+if [[ $LOG_ONLY -eq 1 ]]; then
+  echo "(log-only: reading artifacts already on disk, not running the flow)"
+  RC=0
+else
 set +e
 ORFS="$(sed -n 's/^ORFS *:= *//p' "$HERE/local.mk")" \
 YOSYS_EXE="$(sed -n 's/^YOSYS_EXE *:= *//p' "$HERE/local.mk")" \
@@ -105,6 +117,7 @@ KLAYOUT_CMD="$(sed -n 's/^KLAYOUT_CMD *:= *//p' "$HERE/local.mk")" \
     -t "$TAG" ${HOLD_MARGIN:+--hold-margin "$HOLD_MARGIN"}
 RC=$?
 set -e
+fi
 END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # ---- metrics, straight from the flow's own JSON -------------------------------
