@@ -206,8 +206,21 @@ else:
         # A missed prediction demotes the result: the numbers are real but they
         # do not describe the change this trial claims to be testing.
         rec["result"] = "OK_BUT_WRONG_HARDWARE"
+# LOCKED APPEND. Records are ~1.5 kB and PIPE_BUF on this platform is 512, so a
+# plain O_APPEND write is NOT atomic and two trials finishing together could
+# interleave and corrupt the log. Trials are now run in parallel -- most of an
+# ORFS run is single-threaded, so a machine with 18 cores sits nearly idle
+# through synthesis and global route -- which makes this a live hazard, not a
+# theoretical one.
+import fcntl
 with open(jsonl, "a") as f:
-    f.write(json.dumps(rec) + "\n")
+    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    try:
+        f.write(json.dumps(rec) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    finally:
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 print()
 print("  logged X$X-Y$Y -> %s" % jsonl)
 if rec["metrics"]:
