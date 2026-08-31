@@ -34,6 +34,14 @@ JSONL = os.path.join(HERE, "experiments", "trials.jsonl")
 # attributed to a Y at all.
 FLAT_MHZ = 10.0
 
+# |TNS| below this means the tool met its target and stopped working, so the
+# measurement describes the TARGET rather than the design. Calibrated from real
+# rows: X1-Y1 was saturated at -0.8, while X1-Y0 (-36.0, straining) and X2-Y0
+# (-1067.8, working hard) were not. A small fmax step with saturated TNS is NOT
+# evidence the fix family is exhausted -- it is evidence the period is wrong,
+# which is a different fault with a different remedy.
+SATURATED_TNS = 5.0
+
 
 def load():
     if not os.path.exists(JSONL):
@@ -108,6 +116,7 @@ def grid(trials, metric):
                "cells", "DRC", "metric"))
         prev = None
         moved = []
+        saturated = []
         for t in row:
             m = t.get("metrics")
             if not m:
@@ -118,6 +127,7 @@ def grid(trials, metric):
             d = None if prev is None else f - prev
             if d is not None:
                 moved.append(abs(d))
+                saturated.append(abs(m["setup_tns"]) < SATURATED_TNS)
             hold = m["hold_ws_ns"]
             print("    %-4d %-6s %-9.1f %-9s %-+9.4f %-+9.4f %-8d %-7d %s"
                   % (t["y"], t["result"], f,
@@ -132,6 +142,19 @@ def grid(trials, metric):
         # exhausted, and "X advances when Y stops moving" is about the recent
         # steps. Requiring every step to be flat would keep a dead row alive
         # forever on the strength of its first success.
+        # Saturation is checked BEFORE flatness, because a saturated step is not a
+        # flat step -- it is an unmeasured one, and calling it flat would blame the
+        # fix family for the period's fault. This is the exact mistake the X1 row
+        # invited: +0.3 MHz looked like exhaustion and was actually a hidden 15%.
+        if moved and saturated and saturated[-1] and moved[-1] < FLAT_MHZ:
+            print("    => LAST STEP IS SATURATED, NOT FLAT: |TNS| < %.0f means the"
+                  % SATURATED_TNS)
+            print("       tool met its target and stopped, so this measures the")
+            print("       TARGET, not the design. Do NOT read it as the fix family")
+            print("       being exhausted. Re-measure the same RTL at a tighter")
+            print("       period before spending another Y or advancing X on it.")
+            print()
+            continue
         TAIL = 2
         tail = moved[-TAIL:]
         if len(tail) >= TAIL and all(d < FLAT_MHZ for d in tail):
