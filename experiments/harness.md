@@ -477,3 +477,53 @@ binary search per variant — roughly eight more runs — to refine numbers that
 change the recommendation. The proportionate answer is to label them lower bounds,
 state that the ordering is robust, and stop. Chasing exact limits here would be
 precision without decision value.
+
+### X2-Y4 — the calibration corrects a claim made two commits ago
+
+`PIPE=3` at 1.60: **514.9 MHz**, needs 1.942 (was 511.4 / 1.955 at a 1.80 target).
+
+**The two variants were effort-limited by very different amounts:**
+
+| variant | tightening | gain |
+|---|---|---|
+| `PIPE=2` | 1.80 → 1.50 | **+22.7 MHz** |
+| `PIPE=3` | 1.80 → 1.60 | **+3.5 MHz** |
+
+`PIPE=2` was heavily effort-limited; `PIPE=3` was barely. That has a mechanism: the
+more pipelined the design, the less optimisation headroom remains in its already
+short stages, so a given target lands nearer the true limit. Effort-limitation is
+therefore **not a uniform offset** — it shrinks as the design improves, which means
+it cannot be corrected for with a constant and must be measured per variant.
+
+**RETRACTION.** Two commits ago this file recorded, and it was reported as a
+headline, that `PIPE=3` was *"the best value rung by a wide margin"* at
+**+28.00 MHz/1k flops, 5.9× better than `PIPE=2`**. That was an artifact of
+comparing `PIPE=3` against `PIPE=2`'s **floor**. With both properly pushed:
+
+| PIPE | MHz/1k flops | as previously claimed |
+|---|---|---|
+| 1 | **+11.87** | +11.87 — unchanged, and actually the best value |
+| 2 | +6.14 | +4.75 — was understated |
+| 3 | +9.27 | **+28.00 — inflated 3×** |
+
+So `PIPE=1` is the best-value rung, and `PIPE=3` beats `PIPE=2` by **1.5×, not
+5.9×**. The error was structural, not arithmetic: an efficiency ratio between two
+variants is only meaningful when *both* are measured at comparable effort, and
+nothing in the tooling enforced that. `trials.py` grouping by "best per variant"
+made it look rigorous while the underlying numbers were not comparable.
+
+**What survives, and it is the part that matters:**
+
+- **Dominance holds, more strongly than before.** `PIPE=3` (514.9 MHz, 519,051
+  cells) versus `PIPE=2` (505.4 MHz, 583,132 cells): faster by 9.5 MHz *and*
+  smaller by 64,081 cells. Since `PIPE` is cumulative, **do not stop at `PIPE=2`**.
+- **The ordering `PIPE=3 > 2 > 1 > 0` is unchanged.**
+- **Cumulative: 350.1 → 514.9 MHz = +47.1%**, for +1.9% cells (509,176 → 519,051)
+  and +22,020 flops. Hold met and DRC clean at every rung.
+
+**Lesson for the harness, which is the point of writing this down:** the ladder
+economics view was added to stop fmax-alone from misleading, and it then misled in
+its own way by comparing unequal-effort measurements. A derived metric inherits
+every weakness of its inputs and adds the appearance of rigour. The cost-per-gain
+column should refuse to compare variants whose effort-limitation has not been
+measured — otherwise it is confident nonsense.
