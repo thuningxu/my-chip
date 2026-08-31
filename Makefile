@@ -41,6 +41,10 @@ SAT    ?= 1
 # loop and no PIPE level shortens it -- see experiments/harness.md, X1.
 PIPE   ?= 0
 
+# amx_tdpbssd: 1 registers rd_data, moving the readback off the output-port path
+# where clock insertion delay cannot cancel. Costs a readback cycle, not throughput.
+RDREG  ?= 0
+
 -include local.mk
 
 IVERILOG ?= iverilog
@@ -154,6 +158,7 @@ sim-amx: $(BUILD)
 	@echo "== AMX TDPBSSD regression SAT=$(SAT) PIPE=$(PIPE) =="
 	@$(IVERILOG) -g2005 -o $(BUILD)/tb_amx_s$(SAT)_p$(PIPE).vvp \
 	  -Ptb_amx_tdpbssd.SAT=$(SAT) -Ptb_amx_tdpbssd.PIPE=$(PIPE) \
+	  -Ptb_amx_tdpbssd.RD_REG=$(RDREG) \
 	  tb/tb_amx_tdpbssd.v rtl/amx_tdpbssd.v
 	@vvp $(BUILD)/tb_amx_s$(SAT)_p$(PIPE).vvp | tee $(BUILD)/sim_amx_s$(SAT)_p$(PIPE).log
 	@grep -q '^RESULT: PASS' $(BUILD)/sim_amx_s$(SAT)_p$(PIPE).log \
@@ -178,7 +183,7 @@ schematic:
 .PHONY: measure
 measure: require-setup
 	@ORFS="$(ORFS)" YOSYS_EXE="$(YOSYS_EXE)" KLAYOUT_CMD="$(KLAYOUT_CMD)" \
-	  ./scripts/measure.sh -d $(DESIGN) -n $(N) -c $(CPORT) -r $(OUTPAR) -s $(SAT) \
+	  ./scripts/measure.sh -d $(DESIGN) -n $(N) -c $(CPORT) -r $(OUTPAR) -s $(SAT) -R $(RDREG) \
 	     -p $(PERIOD) -u $(UTIL) $(if $(TAG),-t $(TAG),)
 
 # Build/rebuild the GDS for an already-routed config, without re-running the

@@ -109,7 +109,20 @@ module amx_tdpbssd #(
     // cacc -> 33-bit add -> fold -> cacc, and no amount of PIPE shortens it.
     // That loop is the floor. Flop cost is not uniform either -- see the
     // per-level comments at the registers themselves.
-    parameter integer PIPE = 0
+    parameter integer PIPE = 0,
+    // 1 = register rd_data, adding one cycle of READBACK latency.
+    //
+    // Not a datapath optimisation. At PIPE=3 the worst path stopped being the
+    // compute pipeline and became the tile READ port, and 47% of its arrival was
+    // clock insertion delay that DOES NOT CANCEL -- the path ends at an output
+    // port, so there is no capture flop to contribute an offsetting clock network
+    // delay. Registering rd_data turns it into flop -> mux -> flop, where the
+    // launch and capture clock delays cancel as they do on every other path, and
+    // leaves a short flop -> port hop behind it.
+    //
+    // Costs 512 flops and one readback cycle. Readback is a separate operation
+    // from the multiply, so this is not throughput.
+    parameter integer RD_REG = 0
 )(
     input  wire         clk,
     input  wire         rst_n,
@@ -356,16 +369,33 @@ module amx_tdpbssd #(
             c_row[ci*32 +: 32] = cacc[rd_row][ci];
     end
 
+    reg [511:0] rd_mux;
     always @* begin
         case (rd_sel)
-            SEL_A:   rd_data = a_flat[rd_row*512 +: 512];
-            SEL_B:   rd_data = b_flat[rd_row*512 +: 512];
-            default: rd_data = c_row;
+            SEL_A:   rd_mux = a_flat[rd_row*512 +: 512];
+            SEL_B:   rd_mux = b_flat[rd_row*512 +: 512];
+            default: rd_mux = c_row;
         endcase
     end
 
+    // RD_REG places the flop AFTER the mux, which is the whole point: the mux is
+    // 5 levels deep (a 16:1 row select plus the 3-way rd_sel case) and putting the
+    // register before it would leave that depth on the output-port path where the
+    // clock insertion delay cannot cancel.
+    generate
+        if (RD_REG != 0) begin : g_rd_reg
+            always @(posedge clk) rd_data <= rd_mux;
+        end else begin : g_rd_comb
+            always @* rd_data = rd_mux;
+        end
+    endgenerate
+
     // ---- elaboration-time checks -------------------------------------------
     initial begin
+        if (RD_REG != 0 && RD_REG != 1) begin
+            $display("FATAL: RD_REG must be 0 or 1 (got %0d)", RD_REG);
+            $finish;
+        end
         if (PIPE < 0 || PIPE > 3) begin
             $display("FATAL: PIPE must be 0..3 (got %0d)", PIPE);
             $finish;

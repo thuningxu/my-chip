@@ -527,3 +527,89 @@ its own way by comparing unequal-effort measurements. A derived metric inherits
 every weakness of its inputs and adds the appearance of rigour. The cost-per-gain
 column should refuse to compare variants whose effort-limitation has not been
 measured — otherwise it is confident nonsense.
+
+---
+
+## X3 — "the compute datapath is no longer critical; the READBACK PORT is"
+
+Declared before any RTL change, from X2-Y4's measured path. **Both of the X3
+candidates reasoned out in advance were wrong**, which is worth stating first: X2
+declared its ceilings as clock skew and wire delay, and the leading guesses for X3
+were a physical/floorplanning generation or an internal split of the 8×8 multiply.
+The path report says neither. Declaring X3 from X2's stated ceiling would have
+spent hours optimising something that no longer limits the design — the exact
+"wrong fix family" failure the X-Y rule exists to catch.
+
+### The measurement
+
+X2-Y4's worst path, at a 1.60 ns target:
+
+```
+a_flat[2420]/CK   <- clock network delay 0.717
+a_flat[2420]/Q -> MUX2 x4 -> BUF x2 -> MUX2 -> NOR2 -> AOI21 -> BUF -> rd_data[372]
+arrival 1.522    slack -0.342
+```
+
+| term | ns | share |
+|---|---|---|
+| **clock network delay (uncompensated)** | **0.717** | **47%** |
+| 16:1 `rd_row` mux tree (4× MUX2) | 0.256 | 17% |
+| wire (6× BUF) | 0.284 | 19% |
+| `rd_sel` case + logic | 0.172 | 11% |
+| flop Q | 0.089 | 6% |
+
+**It is the tile READ port, not the datapath.** And the dominant term is clock
+insertion delay that **does not cancel**, because the path ends at an *output port*:
+with no capture flop the capture side contributes 0.000 clock network delay
+(confirmed in the report), so the 0.717 launch delay is pure cost. On any
+flop-to-flop path that same 0.717 appears on both sides and vanishes. That is
+precisely why this path took over while the datapath did not.
+
+### Reports read — the change from X2
+
+| report | why it is new here |
+|---|---|
+| paths ending at **output ports**, specifically | X1 and X2 only ever examined flop-to-flop datapath endpoints, and so could not have seen this |
+| **clock network delay** on the launch side | the dominant term, and invisible unless the path is decomposed |
+| `set_output_delay` in the SDC | 20% of the period is consumed by an I/O assumption before any gate switches |
+
+### Bottleneck blamed
+
+`rd_data`'s combinational path from the tile registers: a 16:1 row mux plus a 3-way
+`rd_sel` case, driven straight to an output port so the clock insertion delay is
+uncompensated.
+
+### Fix family — pipeline the I/O, not the datapath
+
+**Register `rd_data`.** One flop stage, +512 flops, behind a parameter `RD_REG`
+following the proven `SAT`/`PIPE` pattern so both states stay buildable and
+testable. That converts an output-port path into flop→mux→flop, where the 0.717
+cancels, and leaves a short flop→port path behind it.
+
+The cost is one cycle of **readback** latency, which is not throughput-critical:
+readback is a separate operation from the multiply, and the `mac_array` `OUT_PAR`
+work already established that a drain is only expensive when it scales with the
+work (there, `N²` cycles), not when it is a fixed extra cycle.
+
+### What X3 CANNOT reach
+
+It cannot help the datapath, and it should not be expected to. If registering the
+readback works, the design becomes limited by the compute path again — which is the
+*correct* place to be limited, and the point at which the pipelining ceiling X2
+declared (fixed overhead ~0.33 ns, growing per stage) becomes the real wall.
+
+Wire and skew remain untouched. They are still the eventual answer; they are simply
+not the *current* answer, and X3 exists because the measurement said so.
+
+### Y ladder
+
+| Y | change | period | purpose |
+|---|---|---|---|
+| Y0 | `RD_REG=1` on top of `PIPE=3` | 1.60 | same target as X2-Y4, so it is one variable |
+| Y1 | derived from Y0's need | — | only if Y0 moves the limiter back to the datapath |
+
+**Prediction:** the worst path moves off `rd_data` and back onto the compute
+datapath. If fmax does **not** improve, then `rd_data` was not really the binding
+constraint and something else at similar delay takes over — which would itself be
+worth knowing, since it would mean the design has a cluster of paths at ~1.5 ns
+rather than one limiter.

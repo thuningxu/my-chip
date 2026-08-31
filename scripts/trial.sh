@@ -32,7 +32,7 @@ LOG_JSONL="$HERE/experiments/trials.jsonl"
 
 X=""; Y=""; GOAL=""
 DESIGN=amx_tdpbssd
-SAT=1; PIPE=0; PERIOD=2.80; UTIL=40; HOLD_MARGIN=""
+SAT=1; PIPE=0; RDREG=0; PERIOD=2.80; UTIL=40; HOLD_MARGIN=""
 # A written-down prediction the trial will CHECK, not merely sit next to. The
 # first X1-Y1 attempt was a duplicate of its own baseline for 17 minutes because
 # the flop count was logged and never compared to what the change had to add.
@@ -48,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     -d) DESIGN="$2"; shift 2 ;;
     -s) SAT="$2"; shift 2 ;;
     -P) PIPE="$2"; shift 2 ;;
+    -R) RDREG="$2"; shift 2 ;;
     -p) PERIOD="$2"; shift 2 ;;
     -u) UTIL="$2"; shift 2 ;;
     --hold-margin) HOLD_MARGIN="$2"; shift 2 ;;
@@ -95,7 +96,7 @@ GIT_SHA=$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DIRTY=$(git -C "$HERE" status --porcelain 2>/dev/null | head -1)
 
 echo "=============================================================="
-echo " TRIAL X${X}-Y${Y}   $DESIGN   SAT=$SAT PIPE=$PIPE"
+echo " TRIAL X${X}-Y${Y}   $DESIGN   SAT=$SAT PIPE=$PIPE RD_REG=$RDREG"
 echo " period ${PERIOD}ns  util ${UTIL}%${HOLD_MARGIN:+  hold_margin ${HOLD_MARGIN}ns}"
 echo " rtl sha256[0:16] $RTL_SHA   git $GIT_SHA${DIRTY:+ (dirty)}"
 echo " goal: $GOAL"
@@ -112,7 +113,7 @@ set +e
 ORFS="$(sed -n 's/^ORFS *:= *//p' "$HERE/local.mk")" \
 YOSYS_EXE="$(sed -n 's/^YOSYS_EXE *:= *//p' "$HERE/local.mk")" \
 KLAYOUT_CMD="$(sed -n 's/^KLAYOUT_CMD *:= *//p' "$HERE/local.mk")" \
-  "$HERE/scripts/measure.sh" -d "$DESIGN" -s "$SAT" -P "$PIPE" \
+  "$HERE/scripts/measure.sh" -d "$DESIGN" -s "$SAT" -P "$PIPE" -R "$RDREG" \
     -p "$PERIOD" -u "$UTIL" \
     -t "$TAG" ${HOLD_MARGIN:+--hold-margin "$HOLD_MARGIN"}
 RC=$?
@@ -160,7 +161,7 @@ rec = {
   "x": $X, "y": $Y, "tag": "$TAG", "design": "$DESIGN",
   "goal": """$GOAL""",
   "started": "$START", "ended": "$END",
-  "knobs": {"SAT": $SAT, "PIPE": $PIPE, "period_ns": $PERIOD, "util": $UTIL,
+  "knobs": {"SAT": $SAT, "PIPE": $PIPE, "RD_REG": $RDREG, "period_ns": $PERIOD, "util": $UTIL,
             "hold_margin_ns": ${HOLD_MARGIN:-None}},
   "rtl_sha256_16": "$RTL_SHA", "git": "$GIT_SHA", "dirty": bool("""$DIRTY"""),
   "measure_rc": $RC,

@@ -98,6 +98,10 @@ module tb_amx_tdpbssd;
     // Feed-forward pipeline depth. Adds latency, NOT cycles per k-step, so the
     // cycle model gains exactly PIPE.
     parameter integer PIPE = 0;
+    // 1 = rd_data is registered, so readback needs a clock edge. Costs a cycle of
+    // READBACK latency only -- it does not change the operation's cycle count, so
+    // EXP_CYC is untouched.
+    parameter integer RD_REG = 0;
 
     localparam integer ROWS   = 16;
     localparam integer COLSB  = 64;
@@ -124,7 +128,7 @@ module tb_amx_tdpbssd;
     reg  [3:0]   rd_row = 4'd0;
     wire [511:0] rd_data;
 
-    amx_tdpbssd #(.SAT(SAT), .PIPE(PIPE)) dut (
+    amx_tdpbssd #(.SAT(SAT), .PIPE(PIPE), .RD_REG(RD_REG)) dut (
         .clk(clk), .rst_n(rst_n),
         .tile_we(tile_we), .tile_sel(tile_sel), .tile_row(tile_row),
         .tile_wdata(tile_wdata),
@@ -301,7 +305,13 @@ module tb_amx_tdpbssd;
             rd_sel = SEL_C;
             for (m = 0; m < ROWS; m = m + 1) begin
                 rd_row = m[3:0];
-                #0.1;                       // rd_data is combinational
+                // One clock edge, which serves BOTH modes: at RD_REG=1 it is the
+                // edge that captures rd_data, and at RD_REG=0 the combinational
+                // value is already stable so sampling after an edge is equally
+                // valid. Keeping one path means the two modes cannot silently
+                // diverge in how they are read.
+                @(posedge clk);
+                #0.1;
                 for (n = 0; n < DWORDS; n = n + 1)
                     got[m][n] = rd_data[n*32 +: 32];
             end
@@ -491,7 +501,7 @@ module tb_amx_tdpbssd;
     reg signed [ACC_W-1:0] s6_want;
 
     initial begin
-        $display("=== tb_amx_tdpbssd : TDPBSSD 16x64 @ 64x16 -> 16x16, SAT=%0d PIPE=%0d ===", SAT, PIPE);
+        $display("=== tb_amx_tdpbssd : TDPBSSD 16x64 @ 64x16 -> 16x16, SAT=%0d PIPE=%0d RD_REG=%0d ===", SAT, PIPE, RD_REG);
         $display("    %0d INT8 MACs per instruction, %0d multipliers, %0d k-steps",
                  ROWS*DWORDS*KLOG, ROWS*DWORDS*4, KDW);
 

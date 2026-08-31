@@ -29,6 +29,7 @@ CPORT=1
 OUTPAR=0
 SAT=1
 PIPE=0
+RDREG=0
 PERIOD=1.00
 UTIL=40
 TAG=""
@@ -45,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     -r) OUTPAR="$2"; shift 2 ;;
     -s) SAT="$2"; shift 2 ;;
     -P) PIPE="$2"; shift 2 ;;
+    -R) RDREG="$2"; shift 2 ;;
     -p) PERIOD="$2"; shift 2 ;;
     -u) UTIL="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
@@ -74,9 +76,10 @@ case "$DESIGN" in
     NICK="$(nick_amx "$SAT" "$TAG")"
     RTL_LIST="$HERE/rtl/amx_tdpbssd.v"
     TB_FILE="$HERE/tb/tb_amx_tdpbssd.v"
-    TOP_PARAMS="SAT $SAT PIPE $PIPE"
-    SIM_PARAMS=(-Ptb_amx_tdpbssd.SAT="$SAT" -Ptb_amx_tdpbssd.PIPE="$PIPE")
-    CFG_DESC="SAT=$SAT PIPE=$PIPE"
+    TOP_PARAMS="SAT $SAT PIPE $PIPE RD_REG $RDREG"
+    SIM_PARAMS=(-Ptb_amx_tdpbssd.SAT="$SAT" -Ptb_amx_tdpbssd.PIPE="$PIPE"
+                -Ptb_amx_tdpbssd.RD_REG="$RDREG")
+    CFG_DESC="SAT=$SAT PIPE=$PIPE RD_REG=$RDREG"
     ;;
   *)
     echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd" >&2
