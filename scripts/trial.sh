@@ -130,6 +130,20 @@ FLW=$(grep -rhoE 'FLW-0009\] Clock [a-z_]+ slack -?[0-9.]+' \
         "$HERE/work/logs/nangate45/$NICK/base/"*.log 2>/dev/null | tail -1 \
         | grep -oE '\-?[0-9.]+$' || true)
 
+# WHAT IS ACTUALLY LIMITING THIS ROW. Eight trials were logged before anything
+# recorded where the worst path ENDED, and three of them turned out to be limited
+# by an I/O-boundary path rather than by the design -- so their headline fmax was
+# measuring the SDC's pad-delay convention, not the hardware. X2-Y2 was reported
+# at 511.4 MHz when its compute datapath was good for 600.3. See
+# scripts/sta_limiter.sh for the arithmetic. Never optional: a frequency without
+# a limiter class cannot be compared to another frequency.
+LIMFILE="$HERE/work/logs/nangate45/$NICK/base/limiter.json"
+if [[ -d "$(dirname "$LIMFILE")" ]]; then
+  "$HERE/scripts/sta_limiter.sh" -d "$DESIGN" -s "$SAT" -t "$TAG" > "$LIMFILE" 2>/dev/null \
+    || echo '{"error":"sta_limiter.sh failed"}' > "$LIMFILE"
+  echo "  limiter: $(python3 -c "import json,sys;d=json.load(open('$LIMFILE'));print(d.get('limiter_class') or d.get('error'))" 2>/dev/null || echo unknown)"
+fi
+
 # PREDICTION CHECK. A trial whose hardware does not match what the change was
 # supposed to build is not a measurement of that change, whatever the PPA says.
 PRED_NOTE=""
@@ -154,9 +168,9 @@ if [[ -n "$EXPECT_FF" && -f "$NETLIST" ]]; then
   fi
 fi
 
-python3 - "$LOG_JSONL" "$R" "${DRC:-}" "${GDS:-}" "$NETLIST" <<PY
+python3 - "$LOG_JSONL" "$R" "${DRC:-}" "${GDS:-}" "$NETLIST" "${LIMFILE:-}" <<PY
 import json, os, sys, subprocess
-jsonl, rep, drc, gds, netlist = sys.argv[1:6]
+jsonl, rep, drc, gds, netlist, limfile = sys.argv[1:7]
 rec = {
   "x": $X, "y": $Y, "tag": "$TAG", "design": "$DESIGN",
   "goal": """$GOAL""",
@@ -197,6 +211,36 @@ else:
       "gds_bytes": os.path.getsize(gds) if gds and os.path.exists(gds) else 0,
       "flw0009_slack_ns": ${FLW:-None},
     }
+    # WHERE THE LIMIT ACTUALLY IS. implied_fmax_mhz is only a statement about the
+    # hardware when limiter_class == "reg->reg". For an I/O-boundary limiter the
+    # SDC charges 0.2*P (output port) or 0.4*P (input->output) plus 0.1 ns of
+    # uncertainty against the path, and because that budget SCALES with the target
+    # the reported frequency rises as the target tightens with identical cells.
+    # regreg_fmax_mhz has no such term -- launch and capture clock insertion delay
+    # cancel -- so it is the number that is comparable across targets.
+    lim = {}
+    if limfile and os.path.exists(limfile):
+        try:
+            lim = json.load(open(limfile))
+        except Exception as e:
+            lim = {"error": "unreadable limiter.json: %s" % e}
+    rec["metrics"]["limiter_class"]    = lim.get("limiter_class")
+    rec["metrics"]["overall_endpoint"] = lim.get("overall_endpoint")
+    rec["metrics"]["regreg_ws_ns"]     = lim.get("regreg_ws_ns")
+    rec["metrics"]["regreg_endpoint"]  = lim.get("regreg_endpoint")
+    _rr = lim.get("regreg_ws_ns")
+    rec["metrics"]["regreg_fmax_mhz"] = (
+        round(1000.0/($PERIOD - _rr), 1) if _rr is not None and ($PERIOD - _rr) > 0 else None)
+    _cls = lim.get("limiter_class")
+    if _cls is None:
+        rec.setdefault("bugs", []).append(
+            "no limiter class recorded (%s) -- implied_fmax_mhz is uninterpretable"
+            % lim.get("error", "sta_limiter.sh produced nothing"))
+    elif _cls != "reg->reg":
+        rec.setdefault("bugs", []).append(
+            "limiter is %s, NOT the design: implied_fmax_mhz is inflated by the "
+            "period-scaled I/O budget and is not comparable across targets -- "
+            "use regreg_fmax_mhz (%s)" % (_cls, rec["metrics"]["regreg_fmax_mhz"]))
     # The two must agree. They did on every mac_array row; if they ever diverge
     # the run is not trustworthy and the divergence is itself the finding.
     if ${FLW:-None} is not None and abs(${FLW:-0} - ws) > 0.05:

@@ -109,8 +109,14 @@ PY
 # with "Can't run macro (no interpreter)". It needs a real .py file. And stderr is
 # deliberately NOT suppressed here: this is the step that decides whether the
 # stream is trustworthy, so a broken check must be loud, not invisible.
-INSPECT=$(mktemp /tmp/gds_inspect.XXXXXX.py)
-trap 'rm -f "$INSPECT"' EXIT
+# The .py has to survive, so this is a unique DIRECTORY with a fixed filename
+# inside rather than a templated filename: macOS mktemp only substitutes X's at
+# the END of a template, so `mktemp /tmp/f.XXXXXX.py` creates a file named
+# literally "f.XXXXXX.py" and the second CONCURRENT call dies with "File exists",
+# leaving the variable empty.
+INSPECT_DIR=$(mktemp -d)
+INSPECT="$INSPECT_DIR/gds_inspect.py"
+trap 'rm -rf "$INSPECT_DIR"' EXIT
 cat > "$INSPECT" <<PY
 import pya, sys
 ly = pya.Layout(); ly.read("$GDS")

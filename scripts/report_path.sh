@@ -58,8 +58,15 @@ for f in 6_final.odb 6_final.sdc 6_final.spef; do
   fi
 done
 
-TCL=$(mktemp /tmp/report_path.XXXXXX.tcl)
-trap 'rm -f "$TCL"' EXIT
+# A unique DIRECTORY, not a templated filename. macOS mktemp only substitutes
+# X's at the END of a template, so `mktemp /tmp/f.XXXXXX.tcl` creates a file
+# named literally "f.XXXXXX.tcl" and the second CONCURRENT call dies with "File
+# exists", leaving the variable empty. Single-shot use never noticed; running
+# several of these at once left exactly one survivor per batch, which looks
+# convincingly like an out-of-memory kill and is not one.
+TCL_DIR=$(mktemp -d)
+TCL="$TCL_DIR/report_path.tcl"
+trap 'rm -rf "$TCL_DIR"' EXIT
 cat > "$TCL" <<EOF
 # read_db does NOT restore liberty -- load it first or STA-2141 "No liberty
 # libraries found" is all you get.

@@ -62,6 +62,31 @@ def fmt(v, spec="%s"):
     return "-" if v is None else spec % v
 
 
+def headline(m):
+    """The frequency that describes the HARDWARE, plus how trustworthy it is.
+
+    implied_fmax_mhz = 1000/(period - setup_ws) is only a statement about the
+    design when the limiting path runs register-to-register. When it ends at an
+    I/O port the SDC charges 0.2*period (output) or 0.4*period (input->output)
+    plus 0.1 ns uncertainty against it, and because that budget SCALES with the
+    target, the reported frequency rises as the target tightens with identical
+    cells: X3-Y0 reads 620.7 MHz at P=1.60 and would read 670.7 at P=1.00 with
+    nothing changed. Three of the first eight trials were limited that way and
+    X2-Y2 was reported at 511.4 when its datapath was good for 600.3.
+
+    regreg_fmax_mhz has no such term -- launch and capture clock insertion delay
+    cancel across a flop-to-flop path -- so it is comparable across targets and
+    is the objective this project ranks on. Returns (value, limiter, trusted).
+    """
+    rr = m.get("regreg_fmax_mhz")
+    cls = m.get("limiter_class")
+    if rr is not None:
+        return rr, cls, (cls == "reg->reg")
+    # No limiter data: pre-backfill row, or sta_limiter.sh failed. Fall back to
+    # the old metric but never silently -- an untrusted number must look untrusted.
+    return m["implied_fmax_mhz"], cls, False
+
+
 def ladder(trials):
     """Cost per unit gain, grouped by RTL VARIANT (PIPE), not by trial.
 
@@ -78,42 +103,58 @@ def ladder(trials):
     ok = [t for t in trials if t.get("metrics")]
     if len(ok) < 2:
         return
+    # Group by the FULL RTL variant, not by PIPE alone. Keying on PIPE made
+    # "PIPE=3" resolve to X3-Y0, which is PIPE=3 AND RD_REG=1, so RD_REG's gain
+    # was credited to the third pipeline stage: +153.3 MHz for +1,537 flops,
+    # +99.74 MHz per 1k flops, which is 8x the next-best rung and obvious
+    # nonsense. This is the same defect as the earlier per-trial grouping, one
+    # level up: a rung has to be ONE change from the rung below it.
     best = {}
     for t in ok:
-        p = t["knobs"]["PIPE"]
-        if p not in best or t["metrics"]["implied_fmax_mhz"] > best[p]["metrics"]["implied_fmax_mhz"]:
-            best[p] = t
-    print("Ladder economics, best result per RTL variant\n")
-    print("  %-5s %-8s %-9s %-9s %-8s %-9s %s"
-          % ("PIPE", "best at", "fmax MHz", "d fmax", "flops", "d flops",
-             "MHz per 1k flops"))
+        k = (t["knobs"]["PIPE"], t["knobs"].get("RD_REG", 0))
+        if k not in best or headline(t["metrics"])[0] > headline(best[k]["metrics"])[0]:
+            best[k] = t
+    print("Ladder economics, best result per RTL variant")
+    print("  (ranked on reg->reg fmax -- see headline() for why not implied_fmax)\n")
+    print("  %-9s %-8s %-9s %-9s %-8s %-9s %-18s %s"
+          % ("variant", "best at", "fmax MHz", "d fmax", "flops", "d flops",
+             "MHz per 1k flops", "limiter"))
     prev = None
     for p in sorted(best):
         t = best[p]; m = t["metrics"]
-        f, ff = m["implied_fmax_mhz"], m["flipflops"]
+        f, cls, trusted = headline(m)
+        ff = m["flipflops"]
+        label = "P%d/RD%d" % p
         df = dff = None
         if prev:
             df, dff = f - prev[0], ff - prev[1]
         eff = "%+.2f" % (df / (dff / 1000.0)) if (df is not None and dff) else ""
-        print("  %-5d %-8s %-9.1f %-9s %-8d %-9s %s"
-              % (p, "X%dY%d" % (t["x"], t["y"]), f, fmt(df, "%+.1f"), ff,
-                 fmt(dff, "%+d"), eff))
+        print("  %-9s %-8s %-9.1f %-9s %-8d %-9s %-18s %s"
+              % (label, "X%dY%d" % (t["x"], t["y"]), f, fmt(df, "%+.1f"), ff,
+                 fmt(dff, "%+d"), eff, cls or "UNKNOWN"))
         prev = (f, ff)
     print()
     print("  Only the best target per variant is used: a trial measures an")
     print("  (RTL, target) pair, and a saturated target measures the target.")
+    # The rungs are still measured at DIFFERENT targets, and the tool works to
+    # whatever target it is given, so effort differs between rungs even now that
+    # the I/O artifact is gone. Removing the pad-boundary term does not make
+    # cross-target rungs equal-effort; it only stops them being wrong for a
+    # second, avoidable reason.
+    print("  CAVEAT: rungs come from different targets, so effort still differs.")
+    print("  Only equal-target pairs are like-for-like comparisons.")
     print()
 
 
 def grid(trials, metric):
     xs = sorted({t["x"] for t in trials})
-    print("X-Y grid  (metric: %s, headline: implied_fmax_mhz)\n" % metric)
+    print("X-Y grid  (metric: %s, headline: reg->reg fmax)\n" % metric)
     for x in xs:
         row = sorted((t for t in trials if t["x"] == x), key=lambda t: t["y"])
         print("  X%d" % x)
-        print("    %-4s %-6s %-9s %-9s %-8s %-9s %-8s %-7s %s" %
+        print("    %-4s %-6s %-9s %-9s %-8s %-9s %-8s %-7s %-10s %s" %
               ("Y", "res", "fmax MHz", "d fmax", "setup ws", "hold ws",
-               "cells", "DRC", "metric"))
+               "cells", "DRC", "limiter", "metric"))
         prev = None
         moved = []
         saturated = []
@@ -123,19 +164,28 @@ def grid(trials, metric):
                 print("    %-4d %-6s %s" % (t["y"], t["result"],
                                             t.get("note", "")))
                 continue
-            f = m["implied_fmax_mhz"]
+            # The flatness and saturation diagnostics run on the HEADLINE number,
+            # so they inherit whatever that metric's defects are. Before the
+            # limiter class was recorded they ran on implied_fmax_mhz, which
+            # means a row could look like it was moving when the only thing
+            # moving was the period-scaled pad budget.
+            f, cls, trusted = headline(m)
             d = None if prev is None else f - prev
             if d is not None:
                 moved.append(abs(d))
                 saturated.append(abs(m["setup_tns"]) < SATURATED_TNS)
             hold = m["hold_ws_ns"]
-            print("    %-4d %-6s %-9.1f %-9s %-+9.4f %-+9.4f %-8d %-7d %s"
+            print("    %-4d %-6s %-9.1f %-9s %-+9.4f %-+9.4f %-8d %-7d %-10s %s"
                   % (t["y"], t["result"], f,
                      fmt(d, "%+.1f"), m["setup_ws_ns"], hold,
-                     m["stdcells"], m["drc_lines"],
+                     m["stdcells"], m["drc_lines"], cls or "UNKNOWN",
                      fmt(m.get(metric), "%.4g")),
                   end="")
             print("   HOLD VIOLATED" if hold < 0 else "")
+            if not trusted:
+                print("         ^ implied_fmax %.1f is I/O-limited (%s); "
+                      "reg->reg %.1f used instead"
+                      % (m["implied_fmax_mhz"], cls or "no limiter data", f))
             prev = f
         # The diagnostic. What matters is whether the LAST few Y moved it, not
         # whether any Y ever did: a row that jumps once and then plateaus is

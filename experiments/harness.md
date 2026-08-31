@@ -613,3 +613,136 @@ datapath. If fmax does **not** improve, then `rd_data` was not really the bindin
 constraint and something else at similar delay takes over — which would itself be
 worth knowing, since it would mean the design has a cluster of paths at ~1.5 ns
 rather than one limiter.
+
+---
+
+## X3-Y0 result — the fix worked, and the metric was broken
+
+`RD_REG=1` on `PIPE=3` at the same 1.60 ns target. Flop prediction exact: 47,116
+predicted, 47,116 built.
+
+| | X2-Y4 | X3-Y0 |
+|---|---|---|
+| setup WS | −0.3422 | **−0.0108** |
+| TNS | −114.64 | **−0.013** |
+| reported fmax | 514.9 | **620.8** |
+| cells / flops | 519,051 / 46,604 | 522,690 / 47,116 |
+| area / power | 1,029,960 µm² / 2.2166 W | **1,029,030 / 2.0984** |
+
+Area and power fell while 512 flops were added — the buffering collapse already
+seen at PIPE=3 vs PIPE=2. Hold met, DRC clean.
+
+### The prediction was half right
+
+The path did **not** move to the datapath. It is still `rd_data`, just shorter:
+
+```
+0.7630  clock network delay    64% of arrival, CANNOT cancel (no capture flop)
+0.1884  flop Q
+0.2393  two buffers to the pad
+1.1908  arrival        vs required 1.180 = 0.8*P − 0.100
+```
+
+Registering the port removed five mux levels but not the *structural* problem: an
+output port has no capture flop, so clock insertion delay is charged in full.
+
+### THE DEFECT — this is an X-level finding, not a Y-level one
+
+`constraint.sdc.in` budgets I/O as a **fraction of the period**:
+
+```tcl
+set_input_delay  [expr $clk_period * 0.2] ...
+set_output_delay [expr $clk_period * 0.2] ...
+```
+
+For a path ending at an output port:
+
+```
+slack          = 0.8P − 0.1 − arrival
+implied period = P − slack = 0.2P + 0.1 + arrival
+```
+
+The `0.2P` term **shrinks as the target tightens**, so `1000/(P − ws)` rises with
+byte-identical hardware: 620.7 MHz at P=1.60, 636.5 at 1.40, 653.2 at 1.20, 670.7
+at 1.00. The model reproduces the tool exactly (predicted required 1.180 vs
+reported 1.180), so this is confirmed. A combinational input-port → output-port
+path is charged `0.4P + 0.1` — twice as bad.
+
+**The harness read a frequency for eight trials without ever recording where the
+limiting path ENDED.** That is the defect. The fix family in X3 was right; the
+instrument was not.
+
+### Recovered, not re-measured
+
+Every trial's `6_final.odb/.sdc/.spef` was still on disk, so the honest metric was
+re-derived with read-only STA — minutes, not eight × ~40-minute re-runs. Every
+recovered overall-WS matched its logged value within 0.002 ns, which is what makes
+the retroactive correction legitimate rather than a guess.
+
+| row | PIPE/RD | target | reported | limiter | reg→reg WS | **corrected** |
+|---|---|---|---|---|---|---|
+| X1-Y0 | 0 | 2.80 | 350.1 | reg→reg | −0.0565 | 350.1 ✓ |
+| X1-Y1 | 1 | 2.80 | 350.4 | reg→reg | −0.0539 | 350.4 ✓ |
+| X2-Y0 | 1 | 2.00 | 404.8 | reg→reg | −0.4702 | 404.8 ✓ |
+| X2-Y1 | 2 | 1.80 | 482.7 | reg→reg | −0.2717 | 482.7 ✓ |
+| X2-Y2 | 3 | 1.80 | 511.4 | **IN→OUT** | +0.1341 | **600.3** |
+| X2-Y3 | 2 | 1.50 | 505.4 | reg→reg | −0.4788 | 505.4 ✓ |
+| X2-Y4 | 3 | 1.60 | 514.9 | **OUT-PORT** | +0.0456 | **643.3** |
+| X3-Y0 | 3+RD | 1.60 | 620.8 | **OUT-PORT** | +0.0818 | **658.7** |
+
+**Five of eight rows were never contaminated** — their limiter was register-to-
+register, where insertion delay cancels and no I/O term applies. The tainted three
+are exactly the PIPE=3 rows, which is causally sensible: PIPE=3 shortened the
+compute path enough that the readback path took over, and from that point the
+metric stopped describing the design.
+
+### Retractions
+
+1. **X2-Y2 was 600.3 MHz, not 511.4.** Its compute datapath met 1.80 ns with
+   +0.134 ns spare. PIPE=3 was undersold by ~90 MHz for the rest of the campaign,
+   and subsequent reasoning about PIPE=3 used a number that was measuring the
+   readback mux.
+2. **"X2-Y4 (514.9) beat X2-Y2 (511.4)" is void.** Corrected: 643.3 @1.60 vs
+   600.3 @1.80 — same RTL, different targets, so the gap is optimizer effort, not
+   design. The earlier retraction of this comparison was right for the wrong reason.
+3. **RD_REG bought ~15 MHz of compute, not ~106.** 643.3 → 658.7 at equal target.
+   The reported +105.9 was ~85% removal of a measurement artifact. RD_REG is still
+   a genuine fix — it is what lets the design close at 1.60 ns at all (−0.342 →
+   −0.011) — but not for the reason the metric claimed.
+4. **The `350.1 → 620.8` ladder is not a like-for-like ladder.** It spans 2.80 →
+   1.60 ns. Even among clean rows, optimizer effort differs by target.
+5. **X1's prediction that the accumulate feedback loop would become the floor is
+   wrong.** The tightest real path is the multiplier carry chain
+   (`a_dw_r → 6× FA/HA → ~8 levels AOI/OAI → pr`). The loop has *more* slack.
+
+Also fixed: `mktemp /tmp/f.XXXXXX.tcl` in `report_path.sh` and `gds.sh`. macOS
+only substitutes X's at the **end** of a template, so that form creates a file
+named literally `f.XXXXXX.tcl` and a second CONCURRENT call dies with "File
+exists", leaving the variable empty. It left exactly one survivor per batch and
+looked convincingly like an OOM kill — I diagnosed it as one, wrongly, on the
+strength of a real-but-irrelevant 2.66 GB-per-process measurement.
+
+---
+
+## X4 — measure the design, not the pad boundary
+
+| | |
+|---|---|
+| **Reports read** | `sta_limiter.sh` **first**: limiter class + reg→reg slack. Then `FLW-0009`, `6_report.json`, `5_route_drc.rpt`. A frequency without a limiter class is not admissible |
+| **Bottleneck blamed** | The multiplier carry chain, `a_dw_r → 6× FA/HA → ~8 AOI/OAI → pr`. It is the worst reg→reg path in both X2-Y4 (+0.0456) and X3-Y0 (+0.0818), i.e. the same limiter survived the RD_REG change |
+| **Fix family** | Shorten the multiply→accumulate arithmetic itself: carry-save accumulation so the adder tree's carry propagation stops being resolved every cycle |
+| **Period** | Each variant iterated to its **own fixed point** (`ws ≈ 0`), where `1000/(P−ws)` is self-consistent, OR compared only at equal target. No more cross-target claims |
+| **Hold policy** | Unchanged: `HOLD_SLACK_MARGIN=0.05`, met on every row so far |
+
+### What X4 can and cannot reach
+
+It cannot make the reported `implied_fmax` honest while the limiter is an I/O path.
+`RD_REG=1` leaves a residual flop→2-buffer→port path whose arrival is 64% clock
+insertion delay, and no RTL change touches that — it is a floorplan/pad-boundary
+property. **So X4 tracks `regreg_fmax_mhz` as the objective** and treats
+`implied_fmax_mhz` as a signoff question, not a design one.
+
+The deliberate decision NOT taken: switching the SDC to absolute I/O delays. That
+is the cleaner convention and a one-line change, but it would invalidate the only
+comparison chain that is currently sound. The instrument is now recorded per row,
+which is enough to interpret both conventions.
