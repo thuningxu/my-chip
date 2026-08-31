@@ -432,3 +432,48 @@ saturated by the |TNS| < 5 test, but no longer straining either. So 511.4 MHz
 should be read as a **lower bound** until it is re-measured at a tighter target.
 The calibration already running for `PIPE=2` (X2-Y3, at 1.50 ns) tests exactly this
 class of doubt, and `PIPE=3` deserves the same treatment.
+
+### X2-Y3 (calibration) — every fmax in this project is a LOWER BOUND
+
+Same `PIPE=2` RTL, two targets:
+
+| target | setup WS | need | fmax | TNS | cells |
+|---|---|---|---|---|---|
+| 1.80 | −0.2717 | 2.0717 | 482.7 | −906 | 577,348 |
+| **1.50** | −0.4788 | **1.9788** | **505.4** | −3,550 | 583,132 |
+
+**+22.7 MHz for 5,784 cells, from the same Verilog.** `PIPE=2` was
+effort-limited, not design-limited — and it was *not* saturated (TNS −906), so the
+`|TNS| < 5` saturation test does **not** catch this. It is a second, distinct
+failure mode.
+
+**Two failure modes, not one:**
+
+| | signature | remedy |
+|---|---|---|
+| **saturated** | \|TNS\| small; the tool met the target and stopped | tighten the target |
+| **effort-limited** | TNS large and negative, yet a tighter target still improves it | tighten the target *further*, or accept a floor |
+
+`repair_timing` works *to the target*, so a tighter ask buys more optimisation
+effort. Which means **fmax in this flow is not a property of a design** — it is a
+function of how hard the flow was asked.
+
+**This generalises beyond the campaign.** Every row in `EXPERIMENTS.md` is "fmax at
+the effort implied by its target", not "the fmax of this design". The saving grace:
+rows sharing a target stay comparable, and v0/f1a/f1b/f2a/f2b are all at 1.00 ns,
+so their relative ordering stands. The absolutes are floors.
+
+**The design conclusion survives, which is what matters.** Against `PIPE=2`'s
+*improved* number:
+
+- `PIPE=2` best known: 505.4 MHz, 583,132 cells
+- `PIPE=3` best known: 511.4 MHz, 514,700 cells — **and not yet pushed**
+
+`PIPE=3` is still faster *and* 68,432 cells smaller. The dominance holds, and the
+ordering `PIPE=3 > 2 > 1 > 0` is robust even though every magnitude is a floor.
+
+**Where this stops, deliberately.** Establishing a true fmax per variant needs a
+binary search per variant — roughly eight more runs — to refine numbers that do not
+change the recommendation. The proportionate answer is to label them lower bounds,
+state that the ordering is robust, and stop. Chasing exact limits here would be
+precision without decision value.
