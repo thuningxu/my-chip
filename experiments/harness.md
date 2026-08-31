@@ -349,3 +349,41 @@ a value with a fixed offset.** The 401 MHz predicted for X2-Y0 against 404.8 act
 was right in direction and close in magnitude, but for an over-fitted reason —
 recorded because a calibration believed too precisely is how the next wrong
 confident number gets made.
+
+### X2-Y1 (PIPE=2) — the ladder is still climbing, and my prediction was wrong
+
+| PIPE | best at | fmax | Δ | flops | Δ flops | MHz per 1k flops |
+|---|---|---|---|---|---|---|
+| 0 | X1Y0 | 350.1 | — | 24,584 | — | — |
+| 1 | X2Y0 | 404.8 | +54.7 | 29,194 | +4,610 | **+11.87** |
+| 2 | X2Y1 | **482.7** | **+77.9** | 45,579 | +16,385 | **+4.75** |
+
+**+37.9% cumulative over `PIPE=0`**, hold met (+0.0353, 0 viol), DRC clean, and the
+flop prediction hit exactly (45,579).
+
+**The prediction in Y1's goal string was wrong**, and it is worth saying how: it
+said *"the multiply still dominates the split so the gain should be smaller than
+PIPE=1's +54.7 MHz"*. The gain is **larger**, +77.9. So the adder tree was a bigger
+fraction of that stage than assumed — the multiply does not dominate it as much as
+the gate counts suggested (an 8×8 multiply is ~407 gates against a 4-input tree of
+~250, and depth is evidently distributed differently from gate count).
+
+**Absolute gain and efficiency now point in opposite directions**, which is
+precisely why the cost-per-gain view was worth building: the ladder is climbing
+*harder* (+77.9 vs +54.7) while getting **2.5× less efficient** per flop. Neither
+number alone would say what to do next.
+
+**1.80 ns is not saturating `PIPE=2`** — TNS −906.0, the tool working hard. That
+validates the deliberate deviation of running `PIPE=3` at the same target: the two
+are a fair one-variable comparison, unless `PIPE=3` is fast enough to saturate
+1.80, which its own TNS will reveal.
+
+**What `PIPE=3` has to beat**, at only +1,024 flops:
+
+| to beat | it needs |
+|---|---|
+| `PIPE=2` efficiency (+4.75 MHz/1k) | **+4.9 MHz** |
+| `PIPE=1` efficiency (+11.87 MHz/1k) | +12.2 MHz |
+
+So the cheapest rung is likely the best *value* even if its absolute gain is small —
+a conclusion the fmax column alone would never produce.
