@@ -387,3 +387,48 @@ are a fair one-variable comparison, unless `PIPE=3` is fast enough to saturate
 
 So the cheapest rung is likely the best *value* even if its absolute gain is small —
 a conclusion the fmax column alone would never produce.
+
+### X2-Y2 (PIPE=3) — the cheapest rung is the best value, and it DOMINATES PIPE=2
+
+| PIPE | best at | fmax | Δ | flops | Δ flops | MHz per 1k flops | stdcells |
+|---|---|---|---|---|---|---|---|
+| 0 | X1Y0 | 350.1 | — | 24,584 | — | — | 509,176 |
+| 1 | X2Y0 | 404.8 | +54.7 | 29,194 | +4,610 | +11.87 | 492,398 |
+| 2 | X2Y1 | 482.7 | +77.9 | 45,579 | +16,385 | +4.75 | 577,348 |
+| **3** | **X2Y2** | **511.4** | +28.7 | 46,604 | **+1,025** | **+28.00** | **514,700** |
+
+**+46.1% frequency over the baseline for +1.1% cells** (509,176 → 514,700), both
+measured near their respective limits. Hold met throughout, DRC clean throughout,
+and the flop prediction exact for the third consecutive trial.
+
+**The prediction in Y2's goal string was right:** the cheapest rung would be the
+best value. It needed +4.9 MHz to beat `PIPE=2`'s efficiency and delivered +28.7,
+at **+28.00 MHz per 1k flops** — 2.4× better than `PIPE=1` and 5.9× better than
+`PIPE=2`.
+
+**`PIPE=3` is faster AND smaller than `PIPE=2`**, which is the counterintuitive
+part and the mechanism is exact:
+
+| | PIPE=2 | PIPE=3 | Δ |
+|---|---|---|---|
+| stdcells | 577,348 | 514,700 | **−62,648** |
+| `timing_repair_buffer` | 127,433 | 65,593 | **−61,840** |
+| setup TNS | −906.0 | −31.6 | +874.5 |
+
+The buffer collapse *is* the cell saving — they match to within 800 cells. **+1,025
+flops let the tool skip ~62,000 repair buffers**, because the shortened stage no
+longer needs sizing and buffering to hit the target. Adding registers made the
+design smaller.
+
+Practical consequence: `PIPE` is cumulative, so `PIPE=3` is not an alternative to
+`PIPE=2` but a superset of it. The recommendation is therefore **do not stop at
+`PIPE=2`** — that intermediate point is strictly worse on both axes than paying
+1,025 more flops to finish the job.
+
+**Caveat, flagged not buried: `PIPE=3` may itself be measurement-limited.** Its TNS
+is −31.6, an order of magnitude closer to saturation than `PIPE=2`'s −906, and it
+needs 1.955 ns against a 1.80 target. That is the same shape as the X1 trap: not
+saturated by the |TNS| < 5 test, but no longer straining either. So 511.4 MHz
+should be read as a **lower bound** until it is re-measured at a tighter target.
+The calibration already running for `PIPE=2` (X2-Y3, at 1.50 ns) tests exactly this
+class of doubt, and `PIPE=3` deserves the same treatment.
