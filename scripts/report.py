@@ -513,7 +513,7 @@ W('<tr><td>Hold slack</td><td>%+.4f ns</td><td>%+.4f ns</td><td class="dim">met 
 W('<tr><td>DRC violations</td><td>%d</td><td>%d</td><td class="dim">clean both</td></tr>'
   % (base["drc_lines"], best["drc_lines"]))
 W('</tbody></table></div>')
-W('<p class="fine"><strong>Twice the speed for an eighth of the power</strong>, at +4.6%% cells. '
+W('<p class="fine"><strong>Twice the speed for 7.8&times; less power</strong>, at +4.6%% more cells. '
   'But read the fmax row with its caveat: the two rows were measured at different clock targets, '
   'and the baseline was not saturated at 2.80&nbsp;ns, so the unpipelined design\'s true capability '
   'was never established. <strong>That percentage is indicative, not a measurement.</strong> The '
