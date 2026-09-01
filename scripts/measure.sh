@@ -259,9 +259,9 @@ if [[ ! -s "$R" ]]; then
   echo "FATAL: no metrics at $R" >&2
   exit 1
 fi
-python3 - "$R" "$DRC" "$N" "$PERIOD" "$UTIL" "$NICK" <<'PY'
+python3 - "$R" "$DRC" "$CFG_DESC" "$PERIOD" "$UTIL" "$NICK" <<'PY'
 import json, os, sys
-rpt, drc, n, period, util, nick = sys.argv[1:7]
+rpt, drc, cfg, period, util, nick = sys.argv[1:7]
 d = json.load(open(rpt))
 def g(k, default=0.0):
     return d.get(k, default)
@@ -274,9 +274,13 @@ drc_n = 0
 if os.path.exists(drc):
     drc_n = sum(1 for _ in open(drc))
 print()
-print("| design | N | period | setup WS | TNS | hold WS | implied fmax | DRC | stdcells | flip-flops | area um2 | power W |")
+# "config", not "N". The column used to print $N regardless of design, so a
+# tpu_mmu row built at TN=32 was labelled N=4 while its artifact name and
+# VERILOG_TOP_PARAMS were both correct -- a metrics table mislabelling its own
+# configuration, which is the exact class of defect this project keeps finding.
+print("| design | config | period | setup WS | TNS | hold WS | implied fmax | DRC | stdcells | flip-flops | area um2 | power W |")
 print("|---|---|---|---|---|---|---|---|---|---|---|---|")
-print(f"| {nick} | {n} | {per:.2f} ns | {ws:+.4f} | {tns:.3f} | {hold:+.4f} | "
+print(f"| {nick} | {cfg} | {per:.2f} ns | {ws:+.4f} | {tns:.3f} | {hold:+.4f} | "
       f"{fmax:.0f} MHz | {drc_n} | {int(g('finish__design__instance__count__stdcell'))} | "
       f"{int(g('finish__design__instance__count__class:sequential_cell'))} | "
       f"{int(g('finish__design__instance__area__stdcell'))} | {g('finish__power__total'):.4f} |")
