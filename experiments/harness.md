@@ -746,3 +746,123 @@ The deliberate decision NOT taken: switching the SDC to absolute I/O delays. Tha
 is the cleaner convention and a one-line change, but it would invalidate the only
 comparison chain that is currently sound. The instrument is now recorded per row,
 which is enough to interpret both conventions.
+
+---
+
+## X4 result — the premise was refuted, then confirmed, and the row closes
+
+Three trials, **one RTL** (`PIPE=3 RD_REG=1`), three targets. Flop count 47,116 on
+every row — the guard that nothing drifted.
+
+| target | reg→reg fmax | Δ | TNS | limiter | cells | power |
+|---|---|---|---|---|---|---|
+| 1.60 (X3-Y0) | 658.7 | — | −0.01 sat | OUT-PORT | 522,690 | 2.098 W |
+| 1.40 (X4-Y0) | 698.9 | **+40.2** | −1.56 sat | OUT-PORT | 532,445 | 2.436 W |
+| 1.20 (X4-Y1) | 702.9 | **+4.0** | **−558.27** | **reg→reg** | 567,769 | 3.069 W |
+
+### X4-Y0 refuted X4's premise
+
+X4 blamed the multiplier carry chain. At 1.60 that path had **+0.0818 ns of slack**
+— it had never been observed to fail, so the blame was unfalsified, not confirmed.
+Y0 retargeted with no RTL change and gained **+40.2 MHz**. The path was
+**effort-limited**, not at its wall, and carry-save would have optimised something
+that was not binding. Spending Y0 on a measurement instead of an RTL change is the
+only reason that was caught.
+
+**Both of Y0's timing predictions were wrong.** Predicted reg→reg ≈ 659 (unchanged);
+actual 698.9. Predicted `implied_fmax` ≈ 637 by treating the output-port arrival as
+period-independent; it is not — the tool shortened it 1.191 → 1.085 when pushed, so
+`implied_fmax` mixes the pad-boundary artifact with real optimisation and the
+earlier "670.7 MHz at P=1.00 with identical hardware" projection was too crude. The
+artifact is real; that quantification of it was not.
+
+### X4-Y1 confirmed the wall
+
+The stated stopping condition — *large TNS with a stalled objective* — fired
+exactly: TNS blew up **357×** while the objective moved **+4.0 MHz**, and the
+limiter finally flipped to `reg→reg`. That is a real limit rather than a target.
+**The wall is ~703 MHz.**
+
+### The binding path, and a correction to X4's fix family
+
+`regreg_endpoint` is `pr[14]` on all three rows (different `g_m`/`g_n` instances,
+same bit): `a_dw_r → 6× FA/HA → ~8 levels AOI21/OAI21 → pr[14]`. That is
+partial-product reduction followed by the multiplier's **final carry-propagate
+adder**, and bit 14 of a 16-bit product is where carries arrive last.
+
+So X4's declared fix — "carry-save **accumulation**" — named the wrong stage. The
+binding stage is **multiply→`pr`**, not the accumulate loop, which has more slack.
+
+### Why the row closes instead of spending Y2
+
+1. **`SAT=1` structurally blocks full carry-save.** The fold must clamp once per
+   k-step against the true value, so the accumulator cannot stay redundant across
+   k-steps — it would need a resolve every cycle, defeating the purpose. Carry-save
+   can only move the resolve from the multiply stage into the tree stage, i.e.
+   rebalance, not eliminate.
+2. **The cost is ~+16k flops, +35%.** `pr` is 16,384 flops (16 bits × 1024);
+   redundant form roughly doubles it.
+3. **The headroom being chased is ~4 MHz past a knee already located.**
+
+### The knee — the finding that actually matters for use
+
+| step | Δ fmax | Δ power |
+|---|---|---|
+| 1.60 → 1.40 | +40.2 | +16% |
+| 1.40 → 1.20 | +4.0 | **+26%** |
+
+**1.40 ns / 698.9 MHz / 2.436 W is the operating point**, and there the compute path
+is not even binding — it is still OUT-PORT limited. Past it, power is the cost and
+frequency is not the return.
+
+### What the campaign is entitled to claim
+
+Only equal-target pairs are like-for-like:
+
+| pair | target | change | Δ reg→reg |
+|---|---|---|---|
+| X2-Y1 → X2-Y2 | 1.80 | `PIPE` 2→3 | **+117.6** |
+| X2-Y4 → X3-Y0 | 1.60 | `RD_REG` 0→1 | **+15.4** |
+| X1-Y0 → X1-Y1 | 2.80 | `PIPE` 0→1 | +0.3 (saturated) |
+
+The end-to-end **350.1 → 698.9 MHz** spans 2.80 → 1.40 ns. X1-Y0's TNS was −36.0,
+i.e. **not** saturated, so 350.1 is the tool's best effort at 2.80 and PIPE=0's true
+capability at a tighter target is unmeasured — exactly the effect that turned
+PIPE=3's 658.7 into 698.9. So "+99.6%" is **indicative, not a measurement**, and it
+overstates the gain by an unknown amount. Closing the row does not license the
+headline the old metric would have produced.
+
+X4 closes. The design is limited by a multiplier carry-propagate at ~703 MHz, is
+efficient at ~699, and the next real gain is an arithmetic redesign whose cost was
+measured and judged not worth it.
+
+### Found at close: the X1 row was never flat
+
+X1 was declared flat because fmax moved **+0.3 MHz** (350.1 → 350.4). At the same
+2.80 ns target and the same speed, registering `sum4` also did this:
+
+| | X1-Y0 (PIPE=0) | X1-Y1 (PIPE=1) | |
+|---|---|---|---|
+| power | **19.0014 W** | **0.9921 W** | **−94.8%, 19.2×** |
+| cells | 509,176 | 457,390 | −10.2% |
+| area µm² | 1,086,640 | 920,220 | −15.3% |
+| reg→reg fmax | 350.1 | 350.4 | +0.3 |
+
+Verified against `finish__power__total` in both raw `6_report.json` files, not
+transcribed. Equal target, equal limiter class (`reg→reg` both), one variable.
+
+Mechanism: `PIPE=0` is one enormous combinational path — `kcnt` → 16:1 mux → 1024
+multipliers → adder trees → 33-bit add → fold → `cacc`. Glitches propagate the full
+depth, so every multiplier output toggles repeatedly before settling. One register
+after `sum4` truncates that propagation.
+
+**This is the same defect as the fmax metric, in a second dimension.** X1 watched
+frequency, saw +0.3 MHz, and correctly concluded the row was flat *in the quantity
+it was watching* — while a 19× power win sat in the same `6_report.json` it had
+already parsed. The harness was not wrong about its number; it was wrong about
+which number mattered. A hillclimb that ranks on one scalar cannot see a
+Pareto move, and nothing in X1 through X3 would ever have surfaced this.
+
+Note the 19 W figure also means `PIPE=0` was never a viable configuration on any
+axis — it is 6.2× the power of the 698.9 MHz operating point while being half its
+speed. The pipelining ladder's real justification was never the +99.6% frequency.
