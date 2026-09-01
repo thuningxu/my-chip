@@ -9,8 +9,9 @@
 # so the gate has to be here.
 #
 # Usage:
-#   scripts/measure.sh [-n N] [-c C_PORT] [-r OUT_PAR] [-p PERIOD_NS] [-u UTIL]
-#                      [-t TAG] [--no-sim]
+#   scripts/measure.sh [-d DESIGN] [-n N] [-c C_PORT] [-r OUT_PAR] [-s SAT]
+#                      [-p PERIOD_NS] [-u UTIL] [-t TAG] [--hold-margin NS]
+#                      [--no-sim]
 #
 # Env:
 #   ORFS        path to OpenROAD-flow-scripts   (default: ~/sd/OpenROAD-flow-scripts)
@@ -27,10 +28,15 @@ N=4
 CPORT=1
 OUTPAR=0
 SAT=1
+PIPE=0
+RDREG=0
 PERIOD=1.00
 UTIL=40
 TAG=""
 RUN_SIM=1
+# Empty means "do not set it", which preserves every previously measured row
+# exactly. Only set it deliberately, and record the value with the row.
+HOLD_MARGIN=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,9 +45,12 @@ while [[ $# -gt 0 ]]; do
     -c) CPORT="$2"; shift 2 ;;
     -r) OUTPAR="$2"; shift 2 ;;
     -s) SAT="$2"; shift 2 ;;
+    -P) PIPE="$2"; shift 2 ;;
+    -R) RDREG="$2"; shift 2 ;;
     -p) PERIOD="$2"; shift 2 ;;
     -u) UTIL="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
+    --hold-margin) HOLD_MARGIN="$2"; shift 2 ;;
     --no-sim) RUN_SIM=0; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -67,14 +76,35 @@ case "$DESIGN" in
     NICK="$(nick_amx "$SAT" "$TAG")"
     RTL_LIST="$HERE/rtl/amx_tdpbssd.v"
     TB_FILE="$HERE/tb/tb_amx_tdpbssd.v"
-    TOP_PARAMS="SAT $SAT"
-    SIM_PARAMS=(-Ptb_amx_tdpbssd.SAT="$SAT")
-    CFG_DESC="SAT=$SAT"
+    TOP_PARAMS="SAT $SAT PIPE $PIPE RD_REG $RDREG"
+    SIM_PARAMS=(-Ptb_amx_tdpbssd.SAT="$SAT" -Ptb_amx_tdpbssd.PIPE="$PIPE"
+                -Ptb_amx_tdpbssd.RD_REG="$RDREG")
+    CFG_DESC="SAT=$SAT PIPE=$PIPE RD_REG=$RDREG"
     ;;
   *)
     echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd" >&2
     exit 2 ;;
 esac
+
+# GUARD: the simulated configuration and the SYNTHESISED configuration must be
+# the same one. This exists because they silently diverged: PIPE was added to the
+# RTL, the testbench and SIM_PARAMS, but not to TOP_PARAMS, so the gate ran
+# PIPE=1 and the flow built PIPE=0 -- a trial that measured a duplicate of its own
+# baseline while logging that it was something else. The comment two screens down
+# already warned that a gate on a different configuration is decorative; a comment
+# is not a check, so here is the check.
+for sp in "${SIM_PARAMS[@]}"; do
+  pname="${sp##*.}"; pname="${pname%%=*}"
+  pval="${sp##*=}"
+  if ! printf '%s' "$TOP_PARAMS" | grep -qE "(^| )$pname $pval( |\$)"; then
+    echo "FATAL: parameter drift between the sim gate and synthesis." >&2
+    echo "       sim is given   $pname = $pval" >&2
+    echo "       synth is given TOP_PARAMS = '$TOP_PARAMS'" >&2
+    echo "       Every -P passed to the testbench must appear in VERILOG_TOP_PARAMS," >&2
+    echo "       or the gate proves nothing about what actually gets built." >&2
+    exit 1
+  fi
+done
 
 PERIOD_PS=$(python3 -c "print(int(round(float('$PERIOD')*1000)))")
 
@@ -145,7 +175,7 @@ for f in "$CFG_DIR/config.mk" "$CFG_DIR/constraint.sdc"; do
 done
 
 # ---------------------------------------------------------------- 3. run flow
-echo "== running ORFS ($DESIGN, $CFG_DESC, period=${PERIOD}ns, util=$UTIL) =="
+echo "== running ORFS ($DESIGN, $CFG_DESC, period=${PERIOD}ns, util=$UTIL${HOLD_MARGIN:+, hold_margin=${HOLD_MARGIN}ns}) =="
 # WORK_HOME/DESIGN_HOME redirect every output away from the ORFS tree.
 # DESIGN_CONFIG must be absolute since it is no longer under $ORFS/flow.
 MAKE_ARGS=(
@@ -155,6 +185,10 @@ MAKE_ARGS=(
 )
 [[ -n "${YOSYS_EXE:-}"   ]] && MAKE_ARGS+=("YOSYS_EXE=$YOSYS_EXE")
 [[ -n "${KLAYOUT_CMD:-}" ]] && MAKE_ARGS+=("KLAYOUT_CMD=$KLAYOUT_CMD")
+# Passed on ORFS's make command line so it overrides config.mk without editing
+# the committed template -- which keeps every row measured before this flag
+# existed byte-for-byte reproducible.
+[[ -n "$HOLD_MARGIN"    ]] && MAKE_ARGS+=("HOLD_SLACK_MARGIN=$HOLD_MARGIN")
 
 mkdir -p "$WORK/logs"
 LOG="$WORK/logs/${NICK}_flow.log"

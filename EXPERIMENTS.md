@@ -523,6 +523,52 @@ mixed-sign case happens to be period-2 in `b` so its four-byte sum is invariant
 under reversal. Four mutations, three caught in both modes, one correctly dead at
 `SAT=0`; the table is in [tb/README.md](tb/README.md).
 
+### The routed cost of saturation: 23x what coarse synth predicted
+
+Measured at last, one variable apart (`PIPE=1`, 2.00 ns target, identical
+everything else). This was open from the moment `SAT` was introduced.
+
+| | `SAT=0` | `SAT=1` | Δ |
+|---|---|---|---|
+| setup WS ns | −0.5367 | −0.4702 | +0.0664 |
+| setup TNS | −1242.9 | −1067.8 | +175.1 |
+| implied fmax | 394.2 | 404.8 | +10.6 |
+| **stdcells** | 474,810 | 492,398 | **+17,588** |
+| **flip-flops** | 29,194 | 29,194 | **0** |
+| area µm² | 958,398 | 971,277 | +12,879 |
+
+**Saturation costs area, not state, and not speed.** Zero flops, exactly as
+expected: the clamp is pure combinational logic (an XOR on the top two bits of a
+33-bit sum, a rail select, a fold mux).
+
+**+17,588 stdcells against a coarse-synth prediction of +768. 23×.** That is the
+largest coarse-to-routed misprediction in this project, and the third of its kind:
+
+| change | coarse synth | routed | ratio |
+|---|---|---|---|
+| `c_in` (384-bit input port) | +381 | +1,170 | 3.1× |
+| `out_all` (384-bit output port) | −911 | +99 | **sign flip** |
+| `SAT=1` (the clamp) | +768 | +17,588 | **22.9×** |
+
+The mechanism differs from the first two. Those were wide *ports* whose buffering
+coarse synth cannot see. This one is small logic in the **worst possible place**:
+the fold mux sits inside the accumulate feedback loop, `cacc → add → fold → cacc`,
+so it is on a path the tool must fight for. 17,588 ÷ 256 accumulators ≈ **69 extra
+cells per accumulator** spent sizing and buffering around three coarse cells.
+Coarse counts say what logic exists; they say nothing about where it sits.
+
+**The +10.6 MHz is NOT attributable.** It sits exactly at this project's 10 MHz
+threshold, and its direction is backwards — removing logic should not slow a design
+down. The explanation is that both variants are limited by the *same* feed-forward
+path (`ccnt → mux → multiply → tree → s4r`), which `SAT` does not touch, so `SAT`
+should make no frequency difference at all. Supporting that: `SAT=0` got **worse**
+TNS with **fewer** cells, i.e. the tool simply spent less effort because the
+accumulate loop had slack to spare while the binding path elsewhere was unchanged.
+
+So the honest summary: **`SAT=1` is a 3.6% area tax for a semantic guarantee, and
+free in frequency.** Which makes it a reasonable default — but only because it was
+measured, since coarse synth would have sold it as a 0.15% tax.
+
 ### Synthesis: the tile registers are all there, exactly
 
 Mapped to Nangate45 at `SAT=1`, counted from `1_2_yosys.v`:
