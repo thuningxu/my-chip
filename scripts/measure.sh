@@ -62,6 +62,9 @@ done
 
 # Extra yosys synth args. Only amx_fp8 overrides this; see config.mk.in.
 SYNTH_ARGS=""
+# Hierarchy retention. 0 = ORFS default (flatten everything).
+SYNTH_HIER=0
+SYNTH_KEEP=""
 
 # shellcheck source=scripts/nick.sh
 source "$HERE/scripts/nick.sh"
@@ -112,6 +115,9 @@ case "$DESIGN" in
     # See config.mk.in: `share` cannot help a design whose 1024 adders all run
     # every cycle, and it does not terminate in reasonable time on this one.
     SYNTH_ARGS="-noshare"
+    # 1024 instances of ONE adder: map it once. See config.mk.in for the numbers.
+    SYNTH_HIER=1
+    SYNTH_KEEP="fp32_add fp8_mul"
     ;;
   *)
     echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd, tpu_mmu, amx_fp8" >&2
@@ -187,6 +193,8 @@ sed -e "s|@NICK@|$NICK|g" \
     -e "s|@TOP_PARAMS@|$TOP_PARAMS|g" \
     -e "s|@UTIL@|$UTIL|g" \
     -e "s|@SYNTH_ARGS@|$SYNTH_ARGS|g" \
+    -e "s|@SYNTH_HIER@|$SYNTH_HIER|g" \
+    -e "s|@SYNTH_KEEP@|$SYNTH_KEEP|g" \
     -e "s|@PERIOD_PS@|$PERIOD_PS|g" \
     -e "s|@RTL_DIR@|$HERE/rtl|g" \
     -e "s|@CFG_DIR@|$CFG_DIR|g" \

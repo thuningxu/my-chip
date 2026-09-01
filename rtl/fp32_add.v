@@ -36,10 +36,24 @@
 //   unpack -> magnitude swap -> align (5-stage) -> 28-bit add/sub
 //          -> leading-zero count (5-stage) -> normalise (5-stage) -> round
 //
-// Three barrel shifters and a carry chain in series. This is the design's
-// predicted floor, and the reason amx_fp8 is expected to clock below the INT8
+// This is the design's floor, and the reason amx_fp8 clocks below the INT8
 // designs at equal MAC count: amx_tdpbssd's accumulate loop is a 33-bit integer
 // add and nothing else.
+//
+// WHERE THE TIME ACTUALLY GOES, measured rather than assumed -- flop to flop
+// through this block, mapped to Nangate45 with no parasitics:
+//
+//   74 gate levels, 6.180 ns total
+//   two NOR4_X1 gates alone     1.470 ns  = 24% of the path
+//   all three barrel shifters   0.204 ns  =  3% of the path
+//
+// An earlier version of this comment blamed the three barrel shifters. THAT IS
+// WRONG: at five MUX levels each they are 3% of the path. The cost is sheer
+// DEPTH -- 74 levels of AOI/OAI -- plus two minimum-drive cells fanning out
+// hard. Those two are an artefact of `abc -liberty` picking X1 cells with no
+// load information, so OpenROAD's resizing may well recover some of that in a
+// routed run. Do not quote 6.180 ns as the routed number: it is optimistic on
+// wires and pessimistic on drive strength at the same time.
 //
 // The leading-zero count is written as an explicit 5-level BINARY SEARCH, not as
 // a for-loop with a conditional assignment. The loop form is shorter and yosys
@@ -147,8 +161,14 @@ module fp32_add (
     // carry - lz - 153), and taking norm[26:3] as the 24-bit significand moves
     // the scale to 2^(E-150), the FP32 convention. Signed and 10 bits wide
     // because E ranges over [-27, +256] before clamping.
-    wire signed [9:0] e_norm = $signed({2'b00, big_e}) + $signed({9'd0, carry})
-                                                       - $signed({5'd0, lz});
+    // Declared UNSIGNED even though it holds a two's-complement value, and the
+    // two comparisons below apply $signed() explicitly instead. Addition and
+    // subtraction give identical bits either way, so nothing is lost -- and a
+    // `signed` port or wire that survives into the netlist makes OpenSTA's
+    // Verilog reader fail with STA-0171. See rtl/fp8_mul.v, which lost a run to
+    // exactly that.
+    wire [9:0] e_norm = $signed({2'b00, big_e}) + $signed({9'd0, carry})
+                                               - $signed({5'd0, lz});
 
     // ---- round to nearest, ties to even ------------------------------------
     wire        r_bit   = norm[2];
@@ -157,7 +177,7 @@ module fp32_add (
     wire [24:0] m_rnd   = {1'b0, norm[26:3]} + {24'd0, roundup};
     wire        m_ovf   = m_rnd[24];                 // rounded up to 2^24
     wire [23:0] m_fin   = m_ovf ? m_rnd[24:1] : m_rnd[23:0];
-    wire signed [9:0] e_fin = e_norm + $signed({9'd0, m_ovf});
+    wire [9:0] e_fin = $signed(e_norm) + $signed({9'd0, m_ovf});
 
     // ---- pack ---------------------------------------------------------------
     wire res_zero = (raw == 28'd0);
@@ -165,8 +185,11 @@ module fp32_add (
     // keeps a sign, and only when both were negative.
     wire zero_sgn = (a_zero && b_zero) ? (sa && sb) : 1'b0;
 
-    wire overflow  = (e_fin >= $signed(10'd255));
-    wire underflow = (e_fin <= $signed(10'd0));      // FTZ
+    // $signed() on BOTH sides is load-bearing: e_fin is now an unsigned
+    // declaration, and a mixed comparison in Verilog is evaluated UNSIGNED,
+    // which would make every negative exponent look enormous and defeat FTZ.
+    wire overflow  = ($signed(e_fin) >= $signed(10'd255));
+    wire underflow = ($signed(e_fin) <= $signed(10'd0));      // FTZ
 
     wire [31:0] finite = res_zero  ? {zero_sgn, 31'd0}
                        : overflow  ? {big_s, 8'hFF, 23'd0}

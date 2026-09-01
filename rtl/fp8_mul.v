@@ -39,6 +39,21 @@
 // combinations. tb/fp8_golden.py proves that exhaustively against Fraction, and
 // tb/tb_fp8_mul.v proves the RTL matches. It matters because it means every
 // rounding error in amx_fp8 comes from an adder, and none from a multiplier.
+//------------------------------------------ WHY NO `signed` ON THESE PORTS
+// The exponent ports carry two's-complement values but are declared UNSIGNED, on
+// purpose. Every use site already sign-extends explicitly -- fp8_mul computes
+// $signed({{3{a_exp[5]}}, a_exp}) -- so the keyword contributed nothing to the
+// arithmetic, and addition produces identical bits either way.
+//
+// It DID break the flow. yosys emits `input signed [5:0] a_exp;` into the
+// netlist, and OpenSTA's Verilog reader rejects the `signed` keyword outright:
+//
+//   [ERROR STA-0171] .../1_2_yosys.v line 2152753, syntax error
+//
+// which killed a run at the 1_synth stage. Invisible while the design was
+// flattened, because then there are no submodule ports in the netlist at all --
+// it only appeared once fp8_mul was kept hierarchical. So: do not add `signed`
+// back to a port of any module that might be kept.
 //=============================================================================
 
 //-----------------------------------------------------------------------------
@@ -53,7 +68,7 @@ module fp8_dec (
     input  wire       [7:0] b_in,
     input  wire             fmt,      // 0 = BF8/E5M2, 1 = HF8/E4M3
     output wire             sgn,
-    output wire signed [5:0] exp,     // unbiased: [-14,+15] BF8, [-6,+8] HF8
+    output wire       [5:0] exp,     // unbiased: [-14,+15] BF8, [-6,+8] HF8
     output wire       [3:0] sig4,     // left-aligned significand, [8,15]
     output wire             is_zero,
     output wire             is_inf,
@@ -96,13 +111,13 @@ endmodule
 //-----------------------------------------------------------------------------
 module fp8_mul (
     input  wire             a_sgn,
-    input  wire signed [5:0] a_exp,
+    input  wire       [5:0] a_exp,
     input  wire       [3:0] a_sig,
     input  wire             a_zero,
     input  wire             a_inf,
     input  wire             a_nan,
     input  wire             b_sgn,
-    input  wire signed [5:0] b_exp,
+    input  wire       [5:0] b_exp,
     input  wire       [3:0] b_sig,
     input  wire             b_zero,
     input  wire             b_inf,
@@ -127,9 +142,9 @@ module fp8_mul (
     // 8 bits signed: [-28,+30] plus the renormalise carry, then +127. The result
     // field lands in [99,158], so neither overflow nor underflow is reachable --
     // there is deliberately no clamp here to suggest otherwise.
-    wire signed [8:0] e_unb = $signed({{3{a_exp[5]}}, a_exp})
-                            + $signed({{3{b_exp[5]}}, b_exp})
-                            + $signed({8'd0, hi});
+    wire [8:0] e_unb = $signed({{3{a_exp[5]}}, a_exp})
+                     + $signed({{3{b_exp[5]}}, b_exp})
+                     + $signed({8'd0, hi});
     wire [7:0] e_fld = e_unb[7:0] + 8'd127;
 
     // nrm[7] is the implicit 1; nrm[6:0] are the only 7 fraction bits a product
