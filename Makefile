@@ -46,6 +46,11 @@ PIPE   ?= 0
 # cycle, not throughput.
 RDREG  ?= 0
 
+# tb_fp32_add random-vector count. 20000 is the routine gate; the adder is the
+# block that appears 1024 times, so a deep run (NRAND=500000) before a release is
+# cheap insurance.
+NRAND  ?= 20000
+
 # tpu_mmu array dimension. MACs = TN*TN, so TN=32 gives 1024 -- deliberately the
 # same multiplier count as amx_tdpbssd, which is what makes systolic-vs-broadcast
 # a controlled comparison instead of one across two scales.
@@ -76,7 +81,9 @@ help:
 	@echo "  make sim             run the regression            (N=$(N))"
 	@echo "  make sim-amx         AMX TDPBSSD regression   (SAT=$(SAT) PIPE=$(PIPE))"
 	@echo "  make sim-tpu         TPU systolic regression  (TN=$(TN) RDREG=$(RDREG))"
-	@echo "  make sim-matrix      all designs, all parameter states (28 configs)"
+	@echo "  make sim-fp8units    FP32 adder + FP8 multiplier, the leaf arithmetic"
+	@echo "  make sim-fp8         AMX-FP8 regression, all 4 ops (RDREG=$(RDREG))"
+	@echo "  make sim-matrix      all designs, all parameter states (32 configs)"
 	@echo "  make sim-all         run the regression at N=4,8,16"
 	@echo "  make golden          run the Python reference model"
 	@echo ""
@@ -148,6 +155,10 @@ sim-all:
 # never built in both states is not a parameter, it is dead code with a name.
 .PHONY: sim-matrix
 sim-matrix:
+	@$(MAKE) --no-print-directory sim-fp8units >/dev/null \
+	  && echo "  PASS  fp32_add    NRAND=$(NRAND)" \
+	  && echo "  PASS  fp8_mul     exhaustive 4x256x256" \
+	  || { echo "  FAIL  fp8 leaf arithmetic"; exit 1; }
 	@for n in 4 8 16; do for c in 0 1; do for r in 0 1; do \
 	  $(MAKE) --no-print-directory sim N=$$n CPORT=$$c OUTPAR=$$r >/dev/null \
 	    && echo "  PASS  mac_array   N=$$n CPORT=$$c OUTPAR=$$r" \
@@ -163,7 +174,12 @@ sim-matrix:
 	    && echo "  PASS  tpu_mmu     N=$$n RD_REG=$$r" \
 	    || { echo "  FAIL  tpu_mmu     N=$$n RD_REG=$$r"; exit 1; }; \
 	done; done
-	@echo "== all 28 configurations PASS =="
+	@for r in 0 1; do \
+	  $(MAKE) --no-print-directory sim-fp8 RDREG=$$r >/dev/null \
+	    && echo "  PASS  amx_fp8     RD_REG=$$r" \
+	    || { echo "  FAIL  amx_fp8     RD_REG=$$r"; exit 1; }; \
+	done
+	@echo "== all 32 configurations PASS =="
 
 .PHONY: sim-amx
 # The AMX regression. Separate target rather than a DESIGN switch on `sim`,
@@ -192,11 +208,45 @@ sim-tpu: $(BUILD)
 	@grep -q '^RESULT: PASS' $(BUILD)/sim_tpu_n$(TN)_r$(RDREG).log \
 	  || { echo "TPU regression FAILED"; exit 1; }
 
+.PHONY: sim-fp8units
+# THE LEAF ARITHMETIC, and it runs BEFORE the array regression on purpose.
+# fp32_add appears 1024 times inside a 16-cycle accumulation; a rounding bug
+# found there looks exactly like a schedule bug. Found here it looks like
+# "vector 41 wants 3F800002, got 3F800001". fp8_mul is tested EXHAUSTIVELY --
+# 4 format pairs x 256 x 256 is the entire input space, so it is proved rather
+# than sampled.
+sim-fp8units: $(BUILD)
+	@echo "== FP32 adder regression (NRAND=$(NRAND)) =="
+	@$(IVERILOG) -g2005 -o $(BUILD)/tb_fp32_add.vvp \
+	  -Ptb_fp32_add.NRAND=$(NRAND) tb/tb_fp32_add.v rtl/fp32_add.v
+	@vvp $(BUILD)/tb_fp32_add.vvp | tee $(BUILD)/sim_fp32_add.log
+	@grep -q '^RESULT: PASS' $(BUILD)/sim_fp32_add.log \
+	  || { echo "fp32_add regression FAILED"; exit 1; }
+	@echo "== FP8 multiplier regression (exhaustive) =="
+	@$(IVERILOG) -g2005 -o $(BUILD)/tb_fp8_mul.vvp tb/tb_fp8_mul.v rtl/fp8_mul.v
+	@vvp $(BUILD)/tb_fp8_mul.vvp | tee $(BUILD)/sim_fp8_mul.log
+	@grep -q '^RESULT: PASS' $(BUILD)/sim_fp8_mul.log \
+	  || { echo "fp8_mul regression FAILED"; exit 1; }
+
+.PHONY: sim-fp8
+# The AMX-FP8 array regression. All four instructions in one netlist, so there is
+# no op= parameter here: op[1:0] is a runtime input and the testbench exercises
+# every value.
+sim-fp8: $(BUILD)
+	@echo "== AMX-FP8 regression RD_REG=$(RDREG) =="
+	@$(IVERILOG) -g2005 -o $(BUILD)/tb_amx_fp8_r$(RDREG).vvp \
+	  -Ptb_amx_fp8.RD_REG=$(RDREG) \
+	  tb/tb_amx_fp8.v rtl/amx_fp8.v rtl/fp8_mul.v rtl/fp32_add.v
+	@vvp $(BUILD)/tb_amx_fp8_r$(RDREG).vvp | tee $(BUILD)/sim_amx_fp8_r$(RDREG).log
+	@grep -q '^RESULT: PASS' $(BUILD)/sim_amx_fp8_r$(RDREG).log \
+	  || { echo "AMX-FP8 regression FAILED"; exit 1; }
+
 .PHONY: golden
 golden:
 	@$(PYTHON) tb/golden.py --n $(N) --k 37 --seed 1
 	@$(PYTHON) tb/amx_golden.py
 	@$(PYTHON) tb/tpu_golden.py
+	@$(PYTHON) tb/fp8_golden.py
 
 #-----------------------------------------------------------------------------
 # Schematics. Not gated on sim: these are drawings of the RTL, not claims about
@@ -226,7 +276,7 @@ gds: require-setup
 .PHONY: path
 path: require-setup
 	@./scripts/report_path.sh -d $(DESIGN) -n $(N) --cport $(CPORT) --outpar $(OUTPAR) \
-	     --sat $(SAT) -T $(TN) $(if $(TAG),-t $(TAG),)
+	     --sat $(SAT) -T $(TN) -R $(RDREG) $(if $(TAG),-t $(TAG),)
 
 .PHONY: sweep-period
 sweep-period: require-setup

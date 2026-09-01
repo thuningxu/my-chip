@@ -81,6 +81,7 @@ if [[ -z "$NICK" ]]; then
     mac_array)   NICK="$(nick "$N" "$CPORT" "$TAG" "$OUTPAR")" ;;
     amx_tdpbssd) NICK="$(nick_amx "$SAT" "$TAG")" ;;
     tpu_mmu)     NICK="$(nick_tpu "$TN" "$TAG")" ;;
+    amx_fp8)     NICK="$(nick_fp8 "$TAG")" ;;
     *) echo "FATAL: unknown design '$DESIGN'" >&2; exit 2 ;;
   esac
 fi

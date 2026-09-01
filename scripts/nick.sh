@@ -53,6 +53,18 @@ nick_tpu() {
     printf 'tpu_n%s%s' "${1:-32}" "${2:+_$2}"
 }
 
+# amx_fp8: there is nothing to put in the name. The tile geometry is fixed by the
+# instruction (16x64 fp8, 16x16 fp32) and the four variants are a RUNTIME input,
+# not a build parameter -- one netlist executes all of TDPBF8PS, TDPBHF8PS,
+# TDPHBF8PS and TDPHF8PS, which is the whole point of a unified design. RD_REG is
+# omitted for the same reason it is omitted from nick_tpu: it adds one register
+# and no geometry, so forking every artifact directory over it would be noise.
+# Distinct `fp8_` prefix keeps these clear of my_chip_*, amx_* and tpu_*.
+#   nick_fp8 [TAG]
+nick_fp8() {
+    printf 'fp8%s' "${1:+_$1}"
+}
+
 # List the nicknames that actually exist, for error messages. A "missing
 # directory" error that shows what IS there turns a silent mismatch into an
 # obvious one.

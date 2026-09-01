@@ -131,8 +131,15 @@ case "$DESIGN" in
     CFG_DESC="N=$TN RD_REG=$RDREG"
     NICK="$(nick_tpu "$TN")"
     ;;
+  amx_fp8)
+    RTL="$HERE/rtl/amx_fp8.v $HERE/rtl/fp8_mul.v $HERE/rtl/fp32_add.v"
+    TOPMOD=amx_fp8
+    CHPARAM="-set RD_REG $RDREG"
+    CFG_DESC="RD_REG=$RDREG"
+    NICK="$(nick_fp8 "")"
+    ;;
   *)
-    echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd, tpu_mmu" >&2
+    echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd, tpu_mmu, amx_fp8" >&2
     exit 2 ;;
 esac
 
@@ -681,5 +688,82 @@ PECHK
   echo "is 1024 PEs and no cut of the whole thing is a readable page, which is why"
   echo "these show the repeated unit instead."
 }
+
+views_amx_fp8() {
+
+  # THE REPEATED UNITS ARE ALREADY SEPARATE MODULES, so unlike mac_array and
+  # tpu_mmu there is no selection surgery to do: drawing fp8_mul and fp32_add on
+  # their own IS drawing the unit that is instantiated a thousand times. view()
+  # reads $TOPMOD and $CHPARAM as globals, so retargeting it is a matter of
+  # setting them -- and CHPARAM must be emptied, because `chparam -set RD_REG`
+  # against a module that has no such parameter is an error, not a no-op.
+  #
+  # The view NAMES deliberately are not 01_fp8_mul etc: view() names the module
+  # it extracts after the view with its NN_ prefix stripped, so that would try to
+  # create a second module called fp8_mul and yosys aborts on the name clash.
+  local save_top="$TOPMOD" save_par="$CHPARAM"
+  CHPARAM=""
+
+  # ---- 1. the fp8 multiplier -- and it is SMALLER than the INT8 one ---------
+  # Both formats decode to a common 4-bit left-aligned significand, so one 4x4
+  # unsigned multiply serves all four instructions. Compare 01_dpbd of
+  # amx_tdpbssd: that unit is four 8x8 multipliers and a 3-level tree. The cost
+  # of FP8 is not in the multiply.
+  TOPMOD=fp8_mul
+  view 01_mul8 \
+    "fp8_mul -- one 4x4 significand multiply, exact into FP32" \
+    "Instantiated 1024 times. Products NEVER round: 4+4 significand bits fit FP32's 24." \
+    '$mul' \
+    '*'
+
+  # THE claim of this figure is "one 4x4 multiply". Assert it, the way
+  # views_tpu_mmu does -- that guard is what caught a view captioned as one PE
+  # that actually contained four.
+  python3 - "$OUT/01_mul8.json" <<'MULCHK' || exit 1
+import collections, json, sys
+d = json.load(open(sys.argv[1]))
+h = collections.Counter(c['type'] for m in d['modules'].values()
+                        for c in m.get('cells', {}).values())
+n = h.get('$mul', 0)
+if n != 1:
+    sys.exit("FATAL: 01_mul8 has %d multipliers, expected exactly 1" % n)
+print("   01_mul8: exactly 1 multiplier (4x4), %d adder(s)" % h.get('$add', 0))
+MULCHK
+
+  # ---- 2. the fp8 decoder --------------------------------------------------
+  # 128 of these on the array edges (16 rows x 4 lanes for A, 16 dwords x 4 for
+  # B), shared by all 256 cells rather than one inside each multiplier.
+  TOPMOD=fp8_dec
+  view 02_dec8 \
+    "fp8_dec -- E5M2 or E4M3 to a common significand, DAZ" \
+    "One bit selects the format. exp==15 in E4M3 is a NORMAL, not a special." \
+    '' \
+    '*'
+
+  # ---- 3. THE FLOOR ---------------------------------------------------------
+  # This is the block the whole experiment is about: align, add, count leading
+  # zeros, renormalise, round. Three barrel shifters and a carry chain in
+  # series, 1198 mapped cells, and it sits inside the accumulate FEEDBACK loop
+  # 1024 times over. amx_tdpbssd's equivalent loop is a 33-bit integer add.
+  TOPMOD=fp32_add
+  view 03_add32 \
+    "fp32_add -- the accumulate loop, and the predicted critical path" \
+    "1024 instances, each in a feedback loop. Align + add + LZC + normalise + round." \
+    '' \
+    '*'
+
+  TOPMOD="$save_top"; CHPARAM="$save_par"
+
+  echo
+  echo "Views written to $OUT:"
+  echo "   01_mul8            the multiply -- 4x4, smaller than INT8's 8x8"
+  echo "   02_dec8            format decode, one bit picks E5M2 or E4M3"
+  echo "   03_add32           the accumulate loop: THIS is the frequency floor"
+  echo
+  echo "Coarse cells BEFORE technology mapping. The array itself is 1024 of unit 1"
+  echo "and 1024 of unit 3; no cut of the whole thing is a readable page, which is"
+  echo "why these show the repeated units instead."
+}
+
 # ============================== dispatch =====================================
 views_"$DESIGN"
