@@ -161,6 +161,12 @@ GEN = {
 
 IMG_OUT = "experiments/img"
 
+# ONE layout, not ten. The per-trial die plots were visually near-identical -- dense
+# routed views at the same die size differ in ways the eye cannot attribute -- so
+# nine of them cost 2.2 MB to say nothing the metrics tables do not say better. The
+# final netlist gets one plate of its own instead.
+FINAL_TAG = "x4y1"
+
 
 def extract(tag):
     """Copy a routed layout into experiments/img/ and return its page-relative path.
@@ -169,6 +175,8 @@ def extract(tag):
     cost 3.4 MB, stored the same pixels twice once the .md needed real files, and
     was silently useless on GitHub -- its sanitiser strips data: URIs.
     """
+    if tag != FINAL_TAG:
+        return None, 0
     src = IMG % tag
     if not os.path.exists(src):
         return None, 0
@@ -346,9 +354,7 @@ a{color:var(--cyan)}
 
 /* ---- plate ---- */
 .plates{display:flex;flex-direction:column;gap:clamp(34px,4vw,56px)}
-.plate{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,340px);gap:clamp(22px,3vw,40px);
-  align-items:start}
-@media (max-width:900px){.plate{grid-template-columns:minmax(0,1fr)}}
+.plate{display:block}
 .body{display:flex;flex-direction:column;gap:16px;min-width:0}
 .id{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .tag{font-family:var(--mono);font-size:12px;font-weight:600;letter-spacing:.08em;
@@ -551,14 +557,41 @@ for t, pr, img in rows:
         W('</div>')
     if pr["note"]: W('<p class="aside">%s</p>' % pr["note"])
     W('</div>')
-    if img:
-        cap = ('Routed die, all layers &mdash; %s&nbsp;&micro;m&sup2;, %s cells. Pink and cyan are the lower metal layers, green the vias; blue is unused routing track.'
-               % (format(int(m["area_um2"]), ","), format(m["stdcells"], ",")))
-        W('<figure><img class="shot" src="%s" alt="Routed layout of trial X%dY%d" loading="lazy" decoding="async"><figcaption>%s</figcaption></figure>'
-          % (img, t["x"], t["y"], cap))
     W('</article>')
     nxt = rows[rows.index((t,pr,img))+1] if rows.index((t,pr,img))+1 < len(rows) else None
     if nxt is None or nxt[0]["x"] != x: W('</div>')
+
+
+# ---- final result -----------------------------------------------------------
+fin = [t for t in trials if t["tag"] == FINAL_TAG][0]
+FINM = fin["metrics"]
+OPM = best  # X4-Y0: same netlist, the target this report recommends
+finimg, _ = extract(FINAL_TAG)
+W('<section class="gen" style="padding-top:0"><div class="gen-top"><h2>Final result</h2>'
+  '<p class="claim">PIPE=3 + RD_REG, routed at 1.20 ns</p></div>'
+  '<p class="detail">The netlist the campaign ended on, placed and routed at the tightest target it '
+  'was taken to. This is the run that located the wall: the limiter finally moved off the pad '
+  'boundary onto a genuine register-to-register path, total negative slack blew up 357&times;, and '
+  'the objective moved only +4.0&nbsp;MHz. <strong>The recommended operating point is this same '
+  'netlist at 1.40&nbsp;ns</strong> &mdash; %.1f&nbsp;MHz at %.3f&nbsp;W instead of %.1f&nbsp;MHz at '
+  '%.3f&nbsp;W, since the last four megahertz cost 26%% more power and 35,324 more cells.</p></section>'
+  % (OPM["regreg_fmax_mhz"], OPM["power_w"], FINM["regreg_fmax_mhz"], FINM["power_w"]))
+if finimg:
+    W('<figure style="display:flex;flex-direction:column;gap:10px"><img class="shot" src="%s" '
+      'alt="Routed layout of the final design" loading="lazy" decoding="async">'
+      '<figcaption>Routed die, all layers &mdash; %s&nbsp;&micro;m&sup2;, %s standard cells, '
+      '%s flip-flops, DRC clean. Pink and cyan are the lower metal layers, green the vias; blue is '
+      'unused routing track. The pale border is the die edge; the cell region does not fill it '
+      'because the floorplan targets 40%% utilisation.</figcaption></figure>'
+      % (finimg, format(int(FINM["area_um2"]), ","), format(FINM["stdcells"], ","),
+         format(FINM["flipflops"], ",")))
+W('<section class="stats">')
+W('<div class="stat hi"><span class="k">Operating point</span><span class="v">%.1f</span><span class="n">MHz &middot; 1.40 ns &middot; %.3f W</span></div>' % (OPM["regreg_fmax_mhz"], OPM["power_w"]))
+W('<div class="stat warn"><span class="k">Wall</span><span class="v">%.1f</span><span class="n">MHz &middot; 1.20 ns &middot; %.3f W</span></div>' % (FINM["regreg_fmax_mhz"], FINM["power_w"]))
+W('<div class="stat"><span class="k">Limiter</span><span class="v">MUL</span><span class="n">carry-propagate adder, pr[14]</span></div>')
+W('<div class="stat"><span class="k">Flip-flops</span><span class="v">%s</span><span class="n">%s standard cells</span></div>' % (format(FINM["flipflops"], ","), format(FINM["stdcells"], ",")))
+W('<div class="stat"><span class="k">Hold / DRC</span><span class="v">%+.4f</span><span class="n">%d DRC violations</span></div>' % (FINM["hold_ws_ns"], FINM["drc_lines"]))
+W('</section>')
 
 # summary table
 W('<section class="close"><h2>Every trial, in one table</h2>')
@@ -800,12 +833,6 @@ for t, pr, _img in rows:
     A("`PIPE=%d` `RD_REG=%d` `target %.2f ns` · %s"
       % (k["PIPE"], k.get("RD_REG", 0), k["period_ns"], lim))
     A("")
-    A("![Routed layout of trial X%dY%d](img/%s.webp)" % (t["x"], t["y"], tag))
-    A("")
-    A("*Routed die, all layers — %s µm², %s cells. Pink and cyan are the lower metal layers, "
-      "green the vias; blue is unused routing track.*"
-      % (format(int(m["area_um2"]), ","), format(m["stdcells"], ",")))
-    A("")
     A("**What was tried.** " + html2md(pr["tried"]))
     A("")
     A("**Result.** " + html2md(pr["result"]))
@@ -822,6 +849,36 @@ for t, pr, _img in rows:
     if pr["note"]:
         A("> " + html2md(pr["note"]))
         A("")
+
+
+A("## Final result")
+A("")
+A("*PIPE=3 + RD_REG, routed at 1.20 ns*")
+A("")
+A(html2md("""The netlist the campaign ended on, placed and routed at the tightest target it was
+taken to. This is the run that located the wall: the limiter finally moved off the pad boundary onto
+a genuine register-to-register path, total negative slack blew up 357&times;, and the objective moved
+only +4.0&nbsp;MHz."""))
+A("")
+A("![Routed layout of the final design](img/%s.webp)" % FINAL_TAG)
+A("")
+A("*Routed die, all layers — %s µm², %s standard cells, %s flip-flops, DRC clean. Pink and cyan "
+  "are the lower metal layers, green the vias; blue is unused routing track. The pale border is "
+  "the die edge; the cell region does not fill it because the floorplan targets 40%% utilisation.*"
+  % (format(int(FINM["area_um2"]), ","), format(FINM["stdcells"], ","), format(FINM["flipflops"], ",")))
+A("")
+A("| | value | |")
+A("|---|---|---|")
+A("| Operating point | **%.1f MHz** | 1.40 ns · %.3f W |" % (OPM["regreg_fmax_mhz"], OPM["power_w"]))
+A("| Wall | %.1f MHz | 1.20 ns · %.3f W |" % (FINM["regreg_fmax_mhz"], FINM["power_w"]))
+A("| Limiter | multiplier carry-propagate | ends at `pr[14]` |")
+A("| Flip-flops | %s | %s standard cells |" % (format(FINM["flipflops"], ","), format(FINM["stdcells"], ",")))
+A("| Hold / DRC | %+.4f ns | %d violations |" % (FINM["hold_ws_ns"], FINM["drc_lines"]))
+A("")
+A(html2md("""<strong>The recommended operating point is this same netlist at 1.40&nbsp;ns</strong>,
+not the 1.20&nbsp;ns shown above: the last four megahertz cost 26% more power and 35,324 more
+cells."""))
+A("")
 
 A("## Every trial, in one table")
 A("")
@@ -877,5 +934,5 @@ A("*Generated by [`scripts/report.py`](../scripts/report.py) from "
   "hand-typed.*")
 
 open("experiments/REPORT.md", "w").write("\n".join(M) + "\n")
-print("wrote experiments/REPORT.md  %.1f KB  (+ %d images in %s/)"
-      % (os.path.getsize("experiments/REPORT.md") / 1024.0, len(rows), IMGDIR))
+print("wrote experiments/REPORT.md  %.1f KB  (1 layout in %s/, the final result)"
+      % (os.path.getsize("experiments/REPORT.md") / 1024.0, IMGDIR))

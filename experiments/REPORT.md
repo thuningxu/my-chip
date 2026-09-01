@@ -187,10 +187,6 @@ Period held **fixed at 2.80 ns** across the whole generation, so every rung is c
 
 `PIPE=0` `RD_REG=0` `target 2.80 ns` · design-limited
 
-![Routed layout of trial X1Y0](img/x1y0.webp)
-
-*Routed die, all layers — 1,086,640 µm², 509,176 cells. Pink and cyan are the lower metal layers, green the vias; blue is unused routing track.*
-
 **What was tried.** Establish a comparison point before touching anything. The previous measurement violated *hold* at −0.0349 ns over 34 endpoints — a min-delay failure that no clock period can fix. X1 treated hold as a harness knob rather than an RTL problem and set the tool's `HOLD_SLACK_MARGIN` to 0.05 ns. Period fixed at 2.80 ns, derived from the measured need, and held constant for every trial in the generation.
 
 **Result.** Hold closed completely — 34 violations to zero — with **no RTL change at all**. It was a repair-effort problem, not a design problem. The whole design is one combinational path: `kcnt` through a 16:1 mux, 1024 multipliers, the adder trees, a 33-bit add and the saturating fold, into the accumulator. That shows up in the power number, and nobody looked at it for eight more trials.
@@ -202,10 +198,6 @@ Period held **fixed at 2.80 ns** across the whole generation, so every rung is c
 #### X1·Y1 — PIPE=1 — and the row the metric could not see
 
 `PIPE=1` `RD_REG=0` `target 2.80 ns` · design-limited
-
-![Routed layout of trial X1Y1](img/x1y1.webp)
-
-*Routed die, all layers — 920,220 µm², 457,390 cells. Pink and cyan are the lower metal layers, green the vias; blue is unused routing track.*
 
 **What was tried.** The same change, now actually built: one pipeline register after `sum4`, verified identical in simulation and synthesis.
 
@@ -225,10 +217,6 @@ Target derived per trial from the previous row's measured need; total negative s
 
 `PIPE=1` `RD_REG=0` `target 2.00 ns` · design-limited
 
-![Routed layout of trial X2Y0](img/x2y0.webp)
-
-*Routed die, all layers — 971,277 µm², 492,398 cells. Pink and cyan are the lower metal layers, green the vias; blue is unused routing track.*
-
 **What was tried.** No RTL change. X1's fixed 2.80 ns period was the suspect: total negative slack had been only −0.8 ns, meaning the tool met its target and stopped optimising. If the measurement was saturated, the “flat” row was an artifact of the period. Re-measure the identical netlist at 2.00 ns.
 
 **Result.** `PIPE=1` was worth **+54.7 MHz**, not +0.3. The fix family had worked all along; the procedure had hidden it. From here on, total negative slack is read as the saturation signal before any row is called flat.
@@ -241,10 +229,6 @@ Target derived per trial from the previous row's measured need; total negative s
 
 `PIPE=2` `RD_REG=0` `target 1.80 ns` · design-limited
 
-![Routed layout of trial X2Y1](img/x2y1.webp)
-
-*Routed die, all layers — 1,074,080 µm², 577,348 cells. Pink and cyan are the lower metal layers, green the vias; blue is unused routing track.*
-
 **What was tried.** Also register the raw products, adding 16,384 flops — by far the most expensive rung. Target derived from the previous row's measured need.
 
 **Result.** **+77.9 MHz.** Larger than the previous rung, which contradicted the prediction written before the run: gate count had been used as a proxy for logic depth, and depth is what a clock period actually pays for.
@@ -256,10 +240,6 @@ Target derived per trial from the previous row's measured need; total negative s
 #### X2·Y2 — PIPE=3 — and a number that was measuring the wrong thing
 
 `PIPE=3` `RD_REG=0` `target 1.80 ns` · **pad-limited**
-
-![Routed layout of trial X2Y2](img/x2y2.webp)
-
-*Routed die, all layers — 1,021,570 µm², 514,700 cells. Pink and cyan are the lower metal layers, green the vias; blue is unused routing track.*
 
 **What was tried.** Register the selected operands too, splitting the 16:1 mux from the multiply for only 1,024 more flops. Same 1.80 ns target as the previous rung, so the comparison is clean.
 
@@ -275,10 +255,6 @@ Target derived per trial from the previous row's measured need; total negative s
 
 `PIPE=2` `RD_REG=0` `target 1.50 ns` · design-limited
 
-![Routed layout of trial X2Y3](img/x2y3.webp)
-
-*Routed die, all layers — 1,081,950 µm², 583,132 cells. Pink and cyan are the lower metal layers, green the vias; blue is unused routing track.*
-
 **What was tried.** Re-measure `PIPE=2` at 1.50 ns. Its earlier number came from a run with very large negative slack, meaning the optimiser was still finding improvements when it stopped. If frequency rises purely from asking harder, then no absolute figure in this project is a property of the design.
 
 **Result.** **+22.7 MHz from asking harder alone.** The tool works *to* its target, so every frequency here is a lower bound, and rows measured at different targets are not comparable. This is the finding that made the later correction possible — and the one the campaign kept failing to apply.
@@ -290,10 +266,6 @@ Target derived per trial from the previous row's measured need; total negative s
 #### X2·Y4 — PIPE=3 at a tighter target
 
 `PIPE=3` `RD_REG=0` `target 1.60 ns` · **pad-limited**
-
-![Routed layout of trial X2Y4](img/x2y4.webp)
-
-*Routed die, all layers — 1,029,960 µm², 519,051 cells. Pink and cyan are the lower metal layers, green the vias; blue is unused routing track.*
 
 **What was tried.** Push `PIPE=3` to 1.60 ns to find its own limit.
 
@@ -310,10 +282,6 @@ The slack says how much you missed by; the path says what to change. Reading it 
 #### X3·Y0 — Register the readback port
 
 `PIPE=3` `RD_REG=1` `target 1.60 ns` · **pad-limited**
-
-![Routed layout of trial X3Y0](img/x3y0.webp)
-
-*Routed die, all layers — 1,029,030 µm², 522,690 cells. Pink and cyan are the lower metal layers, green the vias; blue is unused routing track.*
 
 **What was tried.** Read the *path*, not just the slack — the change that defines this generation. The report named the readback port explicitly, so `RD_REG=1` puts a flop after the readback mux, converting an uncancellable port path into flop→mux→flop. Costs one cycle of readback latency, not throughput. Same 1.60 ns target: one variable.
 
@@ -333,10 +301,6 @@ Limiter class recorded before any frequency is quoted; each variant iterated to 
 
 `PIPE=3` `RD_REG=1` `target 1.40 ns` · **pad-limited**
 
-![Routed layout of trial X4Y0](img/x4y0.webp)
-
-*Routed die, all layers — 1,046,050 µm², 532,445 cells. Pink and cyan are the lower metal layers, green the vias; blue is unused routing track.*
-
 **What was tried.** X4 blamed the multiplier's carry-propagate adder and proposed carry-save arithmetic to fix it. But that path had *positive* slack — it had never once been observed to fail, so the blame was unfalsified rather than confirmed. Spend this trial on a measurement instead: identical RTL, target tightened to 1.40 ns.
 
 **Result.** **+40.2 MHz with no RTL change.** The carry chain was merely effort-limited, not at its wall. Building carry-save would have spent roughly 16,000 flops — 35% of the design — optimising a path that was not binding. Both timing predictions written before this run were wrong, including the model of the pad-budget artifact itself: the output path's delay is not period-independent, since the tool shortens that too when pushed.
@@ -351,10 +315,6 @@ Limiter class recorded before any frequency is quoted; each variant iterated to 
 
 `PIPE=3` `RD_REG=1` `target 1.20 ns` · design-limited
 
-![Routed layout of trial X4Y1](img/x4y1.webp)
-
-*Routed die, all layers — 1,088,150 µm², 567,769 cells. Pink and cyan are the lower metal layers, green the vias; blue is unused routing track.*
-
 **What was tried.** Keep tightening the same RTL to 1.20 ns. The stopping condition was written down in advance: *large total negative slack together with a stalled objective* means a real limit; a small one means the tool simply met its target again.
 
 **Result.** The condition fired exactly as specified. Total negative slack blew up **357×** while the objective moved **+4.0 MHz**, and the limiter finally flipped from the pad boundary to a genuine register-to-register path. The wall is **~703 MHz**. The cost of those last four megahertz was 26% more power and 35,324 more cells — which is what closed the campaign: past 1.40 ns, power is the price and frequency is not the return.
@@ -364,6 +324,26 @@ Limiter class recorded before any frequency is quoted; each variant iterated to 
 | **702.9 MHz** | -0.2226 ns | -558.27 | 3.069 W | 47,116 | 567,769 | +0.0330 | 0 |
 
 > The binding path is the multiplier's final carry-propagate adder, ending at bit 14 of a 16-bit product, where carries arrive last.
+
+## Final result
+
+*PIPE=3 + RD_REG, routed at 1.20 ns*
+
+The netlist the campaign ended on, placed and routed at the tightest target it was taken to. This is the run that located the wall: the limiter finally moved off the pad boundary onto a genuine register-to-register path, total negative slack blew up 357×, and the objective moved only +4.0 MHz.
+
+![Routed layout of the final design](img/x4y1.webp)
+
+*Routed die, all layers — 1,088,150 µm², 567,769 standard cells, 47,116 flip-flops, DRC clean. Pink and cyan are the lower metal layers, green the vias; blue is unused routing track. The pale border is the die edge; the cell region does not fill it because the floorplan targets 40% utilisation.*
+
+| | value | |
+|---|---|---|
+| Operating point | **698.9 MHz** | 1.40 ns · 2.436 W |
+| Wall | 702.9 MHz | 1.20 ns · 3.069 W |
+| Limiter | multiplier carry-propagate | ends at `pr[14]` |
+| Flip-flops | 47,116 | 567,769 standard cells |
+| Hold / DRC | +0.0330 ns | 0 violations |
+
+**The recommended operating point is this same netlist at 1.40 ns**, not the 1.20 ns shown above: the last four megahertz cost 26% more power and 35,324 more cells.
 
 ## Every trial, in one table
 
