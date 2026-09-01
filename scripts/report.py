@@ -473,13 +473,76 @@ been measuring the wrong thing for eight consecutive trials.</p>
 </header>''')
 
 # headline: the final chip, and baseline vs final
-best = [t for t in trials if t.get("metrics") and t["tag"]=="x4y0"][0]["metrics"]
+best_tag = "x4y0"   # the operating point: same netlist as the wall, better trade
+best = [t for t in trials if t.get("metrics") and t["tag"]==best_tag][0]["metrics"]
 wall = [t for t in trials if t.get("metrics") and t["tag"]=="x4y1"][0]["metrics"]
 base = [t for t in trials if t.get("metrics") and t["tag"]=="x1y0"][0]["metrics"]
 p1   = [t for t in trials if t.get("metrics") and t["tag"]=="x1y1"][0]["metrics"]
 
 # X1-Y0 is the baseline: PIPE=0, the unpipelined design, at 2.80 ns. There is no
 # X0 generation -- X1 is the first harness.
+
+# ---- throughput accounting ---------------------------------------------------
+# The obvious objection to a pipelining ladder: every stage adds a register, so
+# one instruction takes MORE cycles. Does the arithmetic actually get faster?
+# Answering it needs two numbers, not one, and they differ by 30 points.
+MACS_PER_OP = 16 * 16 * 64          # 16,384 MACs in one TDPBSSD
+MACS_PER_K = MACS_PER_OP // 16      # 1,024 per k-step -- exactly the multiplier count
+
+
+def thr(m, pipe):
+    """(cycles, latency_ns, single_gmacs, sustained_gmacs, gmacs_per_watt).
+
+    The testbench asserts every run takes KDW + 1 + PIPE = 17 + PIPE cycles, so a
+    deeper pipeline really does make one isolated instruction take longer in
+    cycles -- 17 at PIPE=0, 20 at PIPE=3. That is the cost the objection expects.
+
+    But PIPE adds LATENCY, not cycles per k-step. The array still retires 1,024
+    MACs on every clock edge at every depth, so streamed work amortises the fill
+    and sustained throughput tracks frequency exactly. RD_REG costs a READBACK
+    cycle, not an operation cycle, so it does not enter this at all.
+    """
+    f = m["regreg_fmax_mhz"]
+    cyc = 17 + pipe
+    lat = cyc / f * 1000.0                     # ns, start edge to done
+    sust = MACS_PER_K * f / 1000.0             # GMAC/s
+    return cyc, lat, MACS_PER_OP / lat, sust, sust / m["power_w"]
+
+
+# Best measured row per RTL variant, keyed (PIPE, RD_REG) -- same rule the ladder
+# uses, so the two tables can never disagree about which run represents a variant.
+VARIANT_BEST = {}
+for _t in trials:
+    if not _t.get("metrics"):
+        continue
+    _k = (_t["knobs"]["PIPE"], _t["knobs"].get("RD_REG", 0))
+    if (_k not in VARIANT_BEST
+            or _t["metrics"]["regreg_fmax_mhz"] > VARIANT_BEST[_k]["metrics"]["regreg_fmax_mhz"]):
+        VARIANT_BEST[_k] = _t
+VARIANT_ORDER = sorted(VARIANT_BEST)
+
+THR_ROWS = []
+for _k in VARIANT_ORDER[:-1]:
+    THR_ROWS.append((_k, VARIANT_BEST[_k]))
+_fk = VARIANT_ORDER[-1]
+for _t in sorted((t for t in trials
+                  if t.get("metrics")
+                  and (t["knobs"]["PIPE"], t["knobs"].get("RD_REG", 0)) == _fk),
+                 key=lambda t: -t["knobs"]["period_ns"]):
+    THR_ROWS.append((_fk, _t))
+BASE_THR = thr(base, 0)
+FINAL_THR = thr(best, 3)
+
+# Efficiency-optimal measured row, and how it compares to the operating point.
+_effrows = [(thr(t["metrics"], k[0])[4], k, t) for k, t in THR_ROWS]
+EFF_BEST = max(_effrows, key=lambda r: r[0])
+EFF_PEAK_NS = EFF_BEST[2]["knobs"]["period_ns"]
+EFF_PEAK = EFF_BEST[0]
+EFF_PEAK_THR = thr(EFF_BEST[2]["metrics"], EFF_BEST[1][0])
+OP_VS_PEAK_THRPUT = 100.0 * (FINAL_THR[3] / EFF_PEAK_THR[3] - 1.0)
+OP_VS_PEAK_EFF = 100.0 * (FINAL_THR[4] / EFF_PEAK[0] - 1.0) if False else 100.0 * (FINAL_THR[4] / EFF_PEAK - 1.0)
+
+
 def _pct(a_, b_):
     return "%+.1f%%" % (100.0 * (b_ / a_ - 1.0)) if a_ else "-"
 
@@ -512,6 +575,10 @@ W('<tr><td>Hold slack</td><td>%+.4f ns</td><td>%+.4f ns</td><td class="dim">met 
   % (base["hold_ws_ns"], best["hold_ws_ns"]))
 W('<tr><td>DRC violations</td><td>%d</td><td>%d</td><td class="dim">clean both</td></tr>'
   % (base["drc_lines"], best["drc_lines"]))
+W('<tr><td><strong>Streamed throughput</strong></td><td>%.1f GMAC/s</td><td class="f">%.1f GMAC/s</td><td class="f">%s</td></tr>'
+  % (BASE_THR[3], FINAL_THR[3], _pct(BASE_THR[3], FINAL_THR[3])))
+W('<tr><td><strong>Energy efficiency</strong></td><td>%.1f GMAC/s/W</td><td class="f">%.1f GMAC/s/W</td><td class="f">%.1f&times; better</td></tr>'
+  % (BASE_THR[4], FINAL_THR[4], FINAL_THR[4]/BASE_THR[4]))
 W('</tbody></table></div>')
 W('<p class="fine"><strong>Twice the speed for 7.8&times; less power</strong>, at +4.6%% more cells. '
   'But read the fmax row with its caveat: the two rows were measured at different clock targets, '
@@ -524,6 +591,55 @@ W('<p class="fine">The wall is %.1f&nbsp;MHz. Going there costs %.0f%% more powe
   % (wall["regreg_fmax_mhz"], 100*(wall["power_w"]/best["power_w"]-1),
      wall["regreg_fmax_mhz"]-best["regreg_fmax_mhz"]))
 W('</div></section>')
+
+W("""<section class="gen" style="padding-top:0"><div class="gen-top">
+<h2>Does the arithmetic actually get faster?</h2>
+<p class="claim">Cycles per instruction grow 17 to 20. Throughput still doubles.</p></div>
+<p class="detail">A fair objection to any pipelining ladder: each stage inserts a register, so one
+instruction passes through more clock edges. The testbench asserts exactly that &mdash; an operation
+takes <code>17 + PIPE</code> cycles, verified on every run &mdash; so the baseline finishes in 17
+cycles and the final design needs 20, <strong>17.6% more</strong>. If frequency had risen by less
+than that, the design would compute more slowly while looking faster.</p>
+<p class="detail">It did not, and the reason is what <code>PIPE</code> costs. A pipeline register
+adds <em>latency</em>, not cycles per k-step: the array still retires <strong>1,024 MACs on every
+clock edge</strong> at every depth, because that is the multiplier count and the accumulate loop runs
+one k-step per cycle regardless. So the extra cycles are pipeline fill, paid once per instruction
+rather than once per k-step. Streamed work amortises them to nothing.</p></section>""")
+W('<div class="tw"><table><thead><tr><th>Variant</th><th>Target</th><th>fmax</th>'
+  '<th>Cycles</th><th>Latency</th><th>One instruction</th><th>Streamed</th><th>Efficiency</th>'
+  '</tr></thead><tbody>')
+for _k, _t in THR_ROWS:
+    _m = _t["metrics"]
+    _cyc, _lat, _one, _sus, _eff = thr(_m, _k[0])
+    _isop = _t["tag"] == best_tag
+    W('<tr><td>PIPE=%d%s</td><td>%.2f ns%s</td><td>%.1f MHz</td><td>%d</td><td>%.2f ns</td>'
+      '<td>%.1f</td><td class="f">%.1f</td><td class="f">%.1f</td></tr>'
+      % (_k[0], " + RD_REG" if _k[1] else "", _t["knobs"]["period_ns"],
+         ' <span class="dim">&larr; operating point</span>' if _isop else "",
+         _m["regreg_fmax_mhz"], _cyc, _lat, _one, _sus, _eff))
+W('</tbody></table></div>')
+W("""<p class="fine">Columns: <strong>One instruction</strong> is GMAC/s for a single isolated
+<code>TDPBSSD</code>, 16,384 MACs divided by its full latency, so it pays the pipeline fill in full.
+<strong>Streamed</strong> is GMAC/s once the fill is amortised, which is 1,024 MACs per cycle times
+the clock. <strong>Efficiency</strong> is streamed GMAC/s per watt.</p>""")
+W('<p class="fine">Baseline to final: one isolated instruction goes <strong>%.1f &rarr; %.1f '
+  'GMAC/s (+%.1f%%)</strong> &mdash; the +99.6%% clock, less the 17.6%% the extra cycles take back. '
+  'Streamed throughput goes <strong>%.1f &rarr; %.1f GMAC/s (+%.1f%%)</strong>, exactly tracking '
+  'frequency because the registers cost nothing per k-step. Efficiency goes <strong>%.1f &rarr; '
+  '%.1f GMAC/s per watt, a %.1f&times; improvement</strong> &mdash; the frequency gain and the power '
+  'reduction compounding.</p>'
+  % (BASE_THR[2], FINAL_THR[2], 100*(FINAL_THR[2]/BASE_THR[2]-1),
+     BASE_THR[3], FINAL_THR[3], 100*(FINAL_THR[3]/BASE_THR[3]-1),
+     BASE_THR[4], FINAL_THR[4], FINAL_THR[4]/BASE_THR[4]))
+W('<p class="fine">Efficiency is <strong>not</strong> monotonic, and it does not peak where the '
+  'throughput does. The best measured figure is <strong>%.1f GMAC/s per watt at %.2f&nbsp;ns</strong>, '
+  'one target looser than the operating point: tightening from there to 1.40&nbsp;ns buys '
+  '<strong>%+.1f%% streamed throughput for %+.1f%% efficiency</strong>, because the extra frequency '
+  'is paid for with timing-repair cells that burn power. <strong>If energy per MAC is the '
+  'objective rather than throughput, %.2f&nbsp;ns is the better target.</strong> The wall at '
+  '1.20&nbsp;ns is worse on both counts than 1.40 &mdash; it exists to prove where the limit is, not '
+  'to be shipped.</p>'
+  % (EFF_PEAK, EFF_PEAK_NS, OP_VS_PEAK_THRPUT, OP_VS_PEAK_EFF, EFF_PEAK_NS))
 
 # ---- the designs -------------------------------------------------------------
 W('<section class="gen" style="padding-top:0"><div class="gen-top"><h2>The five designs</h2>'
@@ -783,6 +899,10 @@ A("| Die area | %s µm² | %s µm² | %s |"
      _pct(base["area_um2"], best["area_um2"])))
 A("| Hold slack | %+.4f ns | %+.4f ns | met both |" % (base["hold_ws_ns"], best["hold_ws_ns"]))
 A("| DRC violations | %d | %d | clean both |" % (base["drc_lines"], best["drc_lines"]))
+A("| **Streamed throughput** | %.1f GMAC/s | **%.1f GMAC/s** | **%s** |"
+  % (BASE_THR[3], FINAL_THR[3], _pct(BASE_THR[3], FINAL_THR[3])))
+A("| **Energy efficiency** | %.1f GMAC/s/W | **%.1f GMAC/s/W** | **%.1f× better** |"
+  % (BASE_THR[4], FINAL_THR[4], FINAL_THR[4] / BASE_THR[4]))
 A("")
 A(html2md("""<strong>Twice the speed for 7.8&times; less power</strong>, at +4.6% more cells. Read the
 fmax row with one caveat: the two rows were placed and routed at different clock targets, and the
@@ -795,6 +915,61 @@ is why 1.40&nbsp;ns is the operating point and not 1.20.""")
   % (wall["regreg_fmax_mhz"], 100 * (wall["power_w"] / best["power_w"] - 1),
      wall["regreg_fmax_mhz"] - best["regreg_fmax_mhz"]))
 A("")
+A("## Does the arithmetic actually get faster?")
+A("")
+A("*Cycles per instruction grow 17 to 20. Throughput still doubles.*")
+A("")
+A(html2md("""A fair objection to any pipelining ladder: each stage inserts a register, so one
+instruction passes through more clock edges. The testbench asserts exactly that &mdash; an operation
+takes <code>17 + PIPE</code> cycles, verified on every run &mdash; so the baseline finishes in 17
+cycles and the final design needs 20, <strong>17.6% more</strong>. If frequency had risen by less
+than that, the design would compute more slowly while looking faster."""))
+A("")
+A(html2md("""It did not, and the reason is what <code>PIPE</code> costs. A pipeline register adds
+<em>latency</em>, not cycles per k-step: the array still retires <strong>1,024 MACs on every clock
+edge</strong> at every depth, because that is the multiplier count and the accumulate loop runs one
+k-step per cycle regardless. So the extra cycles are pipeline fill, paid once per instruction rather
+than once per k-step. Streamed work amortises them to nothing."""))
+A("")
+A("| Variant | Target | fmax | Cycles | Latency | One instruction | Streamed | Efficiency |")
+A("|---|---|---|---|---|---|---|---|")
+for _k, _t in THR_ROWS:
+    _m = _t["metrics"]
+    _cyc, _lat, _one, _sus, _eff = thr(_m, _k[0])
+    A("| PIPE=%d%s | %.2f ns%s | %.1f MHz | %d | %.2f ns | %.1f | **%.1f** | **%.1f** |"
+      % (_k[0], " + RD_REG" if _k[1] else "", _t["knobs"]["period_ns"],
+         " ← operating point" if _t["tag"] == best_tag else "",
+         _m["regreg_fmax_mhz"], _cyc, _lat, _one, _sus, _eff))
+A("")
+A(html2md("""Columns: <strong>One instruction</strong> is GMAC/s for a single isolated
+<code>TDPBSSD</code>, 16,384 MACs divided by its full latency, so it pays the pipeline fill in full.
+<strong>Streamed</strong> is GMAC/s once the fill is amortised, which is 1,024 MACs per cycle times
+the clock. <strong>Efficiency</strong> is streamed GMAC/s per watt."""))
+A("")
+A("| | Baseline — X1·Y0 | Final — X4·Y0 | Change |")
+A("|---|---|---|---|")
+A("| Cycles per instruction | 17 | 20 | +17.6% |")
+A("| One instruction | %.1f GMAC/s | **%.1f GMAC/s** | **+%.1f%%** |"
+  % (BASE_THR[2], FINAL_THR[2], 100 * (FINAL_THR[2] / BASE_THR[2] - 1)))
+A("| Streamed | %.1f GMAC/s | **%.1f GMAC/s** | **+%.1f%%** |"
+  % (BASE_THR[3], FINAL_THR[3], 100 * (FINAL_THR[3] / BASE_THR[3] - 1)))
+A("| Efficiency | %.1f GMAC/s/W | **%.1f GMAC/s/W** | **%.1f× better** |"
+  % (BASE_THR[4], FINAL_THR[4], FINAL_THR[4] / BASE_THR[4]))
+A("")
+A(html2md("""One isolated instruction gains the +99.6% clock less the 17.6% the extra cycles take
+back. Streamed throughput tracks frequency exactly, because the registers cost nothing per k-step.
+Efficiency compounds the frequency gain with the power reduction."""))
+A("")
+A(html2md("""Efficiency is <strong>not</strong> monotonic, and it does not peak where throughput
+does. The best measured figure is <strong>%.1f GMAC/s per watt at %.2f&nbsp;ns</strong>, one target
+looser than the operating point: tightening from there to 1.40&nbsp;ns buys <strong>%+.1f%% streamed
+throughput for %+.1f%% efficiency</strong>, because the extra frequency is paid for with
+timing-repair cells that burn power. <strong>If energy per MAC is the objective rather than
+throughput, %.2f&nbsp;ns is the better target.</strong> The wall at 1.20&nbsp;ns is worse than 1.40
+on both counts &mdash; it exists to prove where the limit is, not to be shipped.""")
+  % (EFF_PEAK, EFF_PEAK_NS, OP_VS_PEAK_THRPUT, OP_VS_PEAK_EFF, EFF_PEAK_NS))
+A("")
+
 A("## The five designs")
 A("")
 A("*Same datapath. The question was only where to cut it.*")

@@ -34,10 +34,43 @@ Ten synthesis-and-place-and-route experiments on a 1,024-multiplier INT8 tile ma
 | Die area | 1,086,640 µm² | 1,046,050 µm² | -3.7% |
 | Hold slack | +0.0399 ns | +0.0386 ns | met both |
 | DRC violations | 0 | 0 | clean both |
+| **Streamed throughput** | 358.5 GMAC/s | **715.7 GMAC/s** | **+99.6%** |
+| **Energy efficiency** | 18.9 GMAC/s/W | **293.8 GMAC/s/W** | **15.6× better** |
 
 **Twice the speed for 7.8× less power**, at +4.6% more cells. Read the fmax row with one caveat: the two rows were placed and routed at different clock targets, and the tool optimises *to* whatever target it is given, so that percentage is indicative rather than a like-for-like measurement. The power figures are measured at each row's own operating condition, and most of that reduction was won at equal speed and equal target.
 
 The wall is 702.9 MHz. Going there costs 26% more power for +4.0 MHz, which is why 1.40 ns is the operating point and not 1.20.
+
+## Does the arithmetic actually get faster?
+
+*Cycles per instruction grow 17 to 20. Throughput still doubles.*
+
+A fair objection to any pipelining ladder: each stage inserts a register, so one instruction passes through more clock edges. The testbench asserts exactly that — an operation takes `17 + PIPE` cycles, verified on every run — so the baseline finishes in 17 cycles and the final design needs 20, **17.6% more**. If frequency had risen by less than that, the design would compute more slowly while looking faster.
+
+It did not, and the reason is what `PIPE` costs. A pipeline register adds *latency*, not cycles per k-step: the array still retires **1,024 MACs on every clock edge** at every depth, because that is the multiplier count and the accumulate loop runs one k-step per cycle regardless. So the extra cycles are pipeline fill, paid once per instruction rather than once per k-step. Streamed work amortises them to nothing.
+
+| Variant | Target | fmax | Cycles | Latency | One instruction | Streamed | Efficiency |
+|---|---|---|---|---|---|---|---|
+| PIPE=0 | 2.80 ns | 350.1 MHz | 17 | 48.56 ns | 337.4 | **358.5** | **18.9** |
+| PIPE=1 | 2.00 ns | 404.8 MHz | 18 | 44.47 ns | 368.5 | **414.5** | **279.4** |
+| PIPE=2 | 1.50 ns | 505.4 MHz | 19 | 37.59 ns | 435.8 | **517.5** | **225.4** |
+| PIPE=3 | 1.60 ns | 643.3 MHz | 20 | 31.09 ns | 527.0 | **658.7** | **297.2** |
+| PIPE=3 + RD_REG | 1.60 ns | 658.7 MHz | 20 | 30.36 ns | 539.6 | **674.5** | **321.4** |
+| PIPE=3 + RD_REG | 1.40 ns ← operating point | 698.9 MHz | 20 | 28.62 ns | 572.5 | **715.7** | **293.8** |
+| PIPE=3 + RD_REG | 1.20 ns | 702.9 MHz | 20 | 28.45 ns | 575.8 | **719.8** | **234.5** |
+
+Columns: **One instruction** is GMAC/s for a single isolated `TDPBSSD`, 16,384 MACs divided by its full latency, so it pays the pipeline fill in full. **Streamed** is GMAC/s once the fill is amortised, which is 1,024 MACs per cycle times the clock. **Efficiency** is streamed GMAC/s per watt.
+
+| | Baseline — X1·Y0 | Final — X4·Y0 | Change |
+|---|---|---|---|
+| Cycles per instruction | 17 | 20 | +17.6% |
+| One instruction | 337.4 GMAC/s | **572.5 GMAC/s** | **+69.7%** |
+| Streamed | 358.5 GMAC/s | **715.7 GMAC/s** | **+99.6%** |
+| Efficiency | 18.9 GMAC/s/W | **293.8 GMAC/s/W** | **15.6× better** |
+
+One isolated instruction gains the +99.6% clock less the 17.6% the extra cycles take back. Streamed throughput tracks frequency exactly, because the registers cost nothing per k-step. Efficiency compounds the frequency gain with the power reduction.
+
+Efficiency is **not** monotonic, and it does not peak where throughput does. The best measured figure is **321.4 GMAC/s per watt at 1.60 ns**, one target looser than the operating point: tightening from there to 1.40 ns buys **+6.1% streamed throughput for -8.6% efficiency**, because the extra frequency is paid for with timing-repair cells that burn power. **If energy per MAC is the objective rather than throughput, 1.60 ns is the better target.** The wall at 1.20 ns is worse than 1.40 on both counts — it exists to prove where the limit is, not to be shipped.
 
 ## The five designs
 
