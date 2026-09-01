@@ -74,6 +74,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 DESIGN=mac_array
+# tpu_mmu. Schematics default to a SMALL array: readability is the entire point of
+# this target and a 32x32 grid is not a readable page. TN=2 still shows the
+# neighbour structure, which is the thing worth drawing.
+TN=${TN:-2}; RDREG=${RDREG:-1}
 N=2
 CPORT=1
 OUTPAR=0
@@ -88,6 +92,7 @@ while [[ $# -gt 0 ]]; do
     -c) CPORT="$2"; shift 2 ;;
     -r) OUTPAR="$2"; shift 2 ;;
     -s) SAT="$2"; shift 2 ;;
+    -T) TN="$2"; shift 2 ;;
     -o) OUT="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -119,8 +124,15 @@ case "$DESIGN" in
     CFG_DESC="SAT=$SAT"
     NICK="$(nick_amx "$SAT")"
     ;;
+  tpu_mmu)
+    RTL="$HERE/rtl/tpu_mmu.v"
+    TOPMOD=tpu_mmu
+    CHPARAM="-set N $TN -set RD_REG $RDREG"
+    CFG_DESC="N=$TN RD_REG=$RDREG"
+    NICK="$(nick_tpu "$TN")"
+    ;;
   *)
-    echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd" >&2
+    echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd, tpu_mmu" >&2
     exit 2 ;;
 esac
 
@@ -617,5 +629,57 @@ print(sum(len(m['cells']) for m in d['modules'].values()))")
   echo "which is why these show the repeated UNIT instead."
 }
 
+# ---------------------------------------------------------------- tpu_mmu ----
+# The point of drawing this design is the CONTRAST with amx_tdpbssd: there, one
+# operand row broadcasts to 16 units through a 16:1 mux. Here every PE talks only
+# to its right and lower neighbour, so the figures that matter are a single PE and
+# the accumulator that sits outside the array. Names are hierarchy paths
+# (g_row[0].g_col[0]), not line anchors, for the same reason as the amx views.
+views_tpu_mmu() {
+
+  # ---- 1. one PE -- the unit repeated N*N times ----------------------------
+  # One INT8xINT8 multiply, one psum add, and the registers that make the hops
+  # systolic. Compare against 01_dpbd of amx_tdpbssd: that unit is 4 multipliers
+  # plus a 3-level tree plus a saturating fold, all inside the accumulate loop.
+  # This one is a multiply and an add, and nothing in it is in a loop at all.
+  view 01_pe \
+    "One PE -- one INT8 multiply, one psum add, one partial-sum register" \
+    "select prod %ci1 %co3. Repeated N*N times; at TN=32 that is 1024 of these." \
+    '$mul,$add' \
+    'w:g_row[0].g_col[0].prod %ci1 %co3'
+
+  # A PE is ONE multiplier. More than that means the selection pulled in a
+  # neighbour and the figure is lying about what the unit is. %co2 was the first
+  # attempt and reached all four PEs at N=2, which this guard caught.
+  python3 - "$OUT/01_pe.json" <<'PECHK' || exit 1
+import collections, json, sys
+d = json.load(open(sys.argv[1]))
+h = collections.Counter(c['type'] for m in d['modules'].values()
+                        for c in m.get('cells', {}).values())
+n = h.get('$mul', 0)
+if n != 1:
+    sys.exit("FATAL: 01_pe has %d multipliers, expected exactly 1 -- the cut is "
+             "not one PE" % n)
+print("   01_pe: 1 multiplier, %d adder(s), %d flop(s)"
+      % (h.get('$add', 0), h.get('$adff', 0) + h.get('$dff', 0)))
+PECHK
+
+  # NO ACCUMULATOR VIEW, and this is deliberate rather than an omission. The
+  # architectural point worth drawing is that the accumulators sit OUTSIDE the
+  # array, so the array is pure feed-forward and only this one adder is in a
+  # loop -- but no coarse selection isolates a single accumulator. Every cut
+  # tried (acc* %ci2 %co1, and the fire enable at %ci3 %co3) either pulled in
+  # all N*N accumulators or missed the adder entirely, because they share the
+  # readback mux structure. Said here rather than shipping a figure that claims
+  # to show one accumulator and shows four.
+
+  echo
+  echo "Views written to $OUT:"
+  echo "   01_pe                 the repeated unit -- one multiply, one add"
+  echo
+  echo "Coarse cells BEFORE technology mapping, drawn at N=$TN. At N=32 the array"
+  echo "is 1024 PEs and no cut of the whole thing is a readable page, which is why"
+  echo "these show the repeated unit instead."
+}
 # ============================== dispatch =====================================
 views_"$DESIGN"

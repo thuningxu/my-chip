@@ -59,12 +59,14 @@ ORFS="${ORFS:-$(sed -n 's/^ORFS *:= *//p' "$HERE/local.mk" 2>/dev/null)}"
 ORFS="${ORFS:-$HOME/sd/OpenROAD-flow-scripts}"
 
 NICK=""; DESIGN=amx_tdpbssd; SAT=1; TAG=""; N=4; CPORT=1; OUTPAR=0
+TN=32; RDREG=0   # tpu_mmu: array dimension, readback register
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -N) NICK="$2"; shift 2 ;;
     -d) DESIGN="$2"; shift 2 ;;
     -s) SAT="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
+    -T) TN="$2"; shift 2 ;;
     -n) N="$2"; shift 2 ;;
     -c) CPORT="$2"; shift 2 ;;
     -r) OUTPAR="$2"; shift 2 ;;
@@ -78,6 +80,7 @@ if [[ -z "$NICK" ]]; then
   case "$DESIGN" in
     mac_array)   NICK="$(nick "$N" "$CPORT" "$TAG" "$OUTPAR")" ;;
     amx_tdpbssd) NICK="$(nick_amx "$SAT" "$TAG")" ;;
+    tpu_mmu)     NICK="$(nick_tpu "$TN" "$TAG")" ;;
     *) echo "FATAL: unknown design '$DESIGN'" >&2; exit 2 ;;
   esac
 fi

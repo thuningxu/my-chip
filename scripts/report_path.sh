@@ -22,12 +22,14 @@ ORFS="$(sed -n 's/^ORFS *:= *//p' "$HERE/local.mk")"
 # OUT_PAR therefore use long names, which is also why the Makefile passes
 # --cport/--outpar rather than the short flags measure.sh uses.
 DESIGN=mac_array; N=4; CPORT=1; OUTPAR=0; SAT=1
+TN=32; RDREG=0   # tpu_mmu: array dimension, readback register
 TAG=""; GROUP="core_clock"; COUNT=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -d) DESIGN="$2"; shift 2 ;;
     -n) N="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
+    -T) TN="$2"; shift 2 ;;
     -g) GROUP="$2"; shift 2 ;;
     -c) COUNT="$2"; shift 2 ;;
     --cport) CPORT="$2"; shift 2 ;;
@@ -42,6 +44,7 @@ source "$HERE/scripts/nick.sh"
 case "$DESIGN" in
   mac_array)   NICK="$(nick "$N" "$CPORT" "$TAG" "$OUTPAR")"; CFG_DESC="N=$N C_PORT=$CPORT OUT_PAR=$OUTPAR" ;;
   amx_tdpbssd) NICK="$(nick_amx "$SAT" "$TAG")";                CFG_DESC="SAT=$SAT" ;;
+  tpu_mmu)     NICK="$(nick_tpu "$TN" "$TAG")"; CFG_DESC="N=$TN RD_REG=$RDREG" ;;
   *) echo "FATAL: unknown design '$DESIGN'" >&2; exit 2 ;;
 esac
 R="$HERE/work/results/nangate45/$NICK/base"

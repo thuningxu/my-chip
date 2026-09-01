@@ -30,6 +30,9 @@ OUTPAR=0
 SAT=1
 PIPE=0
 RDREG=0
+# tpu_mmu array dimension. Named TN, not N: N is already mac_array's size and
+# silently reusing it would let `-n 4` build a 16-MAC systolic array by accident.
+TN=32
 PERIOD=1.00
 UTIL=40
 TAG=""
@@ -47,6 +50,7 @@ while [[ $# -gt 0 ]]; do
     -s) SAT="$2"; shift 2 ;;
     -P) PIPE="$2"; shift 2 ;;
     -R) RDREG="$2"; shift 2 ;;
+    -T) TN="$2"; shift 2 ;;
     -p) PERIOD="$2"; shift 2 ;;
     -u) UTIL="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
@@ -81,8 +85,16 @@ case "$DESIGN" in
                 -Ptb_amx_tdpbssd.RD_REG="$RDREG")
     CFG_DESC="SAT=$SAT PIPE=$PIPE RD_REG=$RDREG"
     ;;
+  tpu_mmu)
+    NICK="$(nick_tpu "$TN" "$TAG")"
+    RTL_LIST="$HERE/rtl/tpu_mmu.v"
+    TB_FILE="$HERE/tb/tb_tpu_mmu.v"
+    TOP_PARAMS="N $TN RD_REG $RDREG"
+    SIM_PARAMS=(-Ptb_tpu_mmu.N="$TN" -Ptb_tpu_mmu.RD_REG="$RDREG")
+    CFG_DESC="N=$TN RD_REG=$RDREG"
+    ;;
   *)
-    echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd" >&2
+    echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd, tpu_mmu" >&2
     exit 2 ;;
 esac
 

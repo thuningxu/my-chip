@@ -36,6 +36,7 @@ KLAYOUT_CMD="$(sed -n 's/^KLAYOUT_CMD *:= *//p' "$HERE/local.mk")"
 [[ -n "$ORFS" ]] || { echo "ORFS unset in local.mk" >&2; exit 1; }
 
 DESIGN=mac_array; N=4; CPORT=1; OUTPAR=0; SAT=1; TAG=""
+TN=32; RDREG=0   # tpu_mmu: array dimension, readback register
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -d) DESIGN="$2"; shift 2 ;;
@@ -44,6 +45,7 @@ while [[ $# -gt 0 ]]; do
     -r) OUTPAR="$2"; shift 2 ;;
     -s) SAT="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
+    -T) TN="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -52,6 +54,7 @@ done
 case "$DESIGN" in
   mac_array)   NICK="$(nick "$N" "$CPORT" "$TAG" "$OUTPAR")" ;;
   amx_tdpbssd) NICK="$(nick_amx "$SAT" "$TAG")" ;;
+  tpu_mmu)     NICK="$(nick_tpu "$TN" "$TAG")" ;;
   *) echo "FATAL: unknown design '$DESIGN'" >&2; exit 2 ;;
 esac
 WORK="$HERE/work"
