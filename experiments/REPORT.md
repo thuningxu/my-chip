@@ -1,6 +1,4 @@
-# Carry Chain at 703 Megahertz
-
-**Physical design log — Intel AMX `TDPBSSD` on Nangate45**
+# Physical design log — Intel AMX `TDPBSSD` on Nangate45
 
 Ten synthesis-and-place-and-route experiments on a 1,024-multiplier INT8 tile matrix-multiply unit, run as a disciplined hillclimb. Four generations of method, ten routed designs, and a final result that runs at twice the baseline frequency for 7.8 times less power. The design ends up limited by a multiplier's carry-propagate adder.
 
