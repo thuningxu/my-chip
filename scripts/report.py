@@ -4,14 +4,16 @@
 Prose is authored here; every NUMBER is pulled from experiments/trials.jsonl and every
 image from work/reports/.../final_all.webp, so no figure in the report is hand-typed.
 
-Images are embedded as base64 data URIs, which makes the output self-contained (~3.4 MB)
-and viewable with no server and no dependency on work/ still existing. That is why the
-generated HTML is committed alongside this script: work/ is build output and is not in
-git, so once it is cleaned the report cannot be regenerated from this file alone.
+Both outputs reference experiments/img/*.webp, which this script extracts from the routed
+reports and which IS committed. The HTML used to inline those images as base64 data URIs so
+it would survive `make clean-work` -- work/ is build output and not in git. Extracting the
+images for GitHub's sake removed that reason: both reports are now reproducible from
+committed data, so the 3.4 MB self-contained HTML is neither needed nor committed.
+experiments/REPORT.md is the shareable artifact; the HTML is a local convenience.
 
 Run:  python3 scripts/report.py && open experiments/report.html
 """
-import base64, json, os
+import json, os, shutil
 
 IMG = "work/reports/nangate45/amx_s1_%s/base/final_all.webp"
 trials = [json.loads(l) for l in open("experiments/trials.jsonl")]
@@ -157,11 +159,23 @@ GEN = {
      building the RTL change it was created to build."""),
 }
 
-def b64(tag):
-    p = IMG % tag
-    if not os.path.exists(p): return None, 0
-    raw = open(p, "rb").read()
-    return base64.b64encode(raw).decode(), len(raw)
+IMG_OUT = "experiments/img"
+
+
+def extract(tag):
+    """Copy a routed layout into experiments/img/ and return its page-relative path.
+
+    Replaces an earlier base64 inliner. Inlining made the HTML self-contained but
+    cost 3.4 MB, stored the same pixels twice once the .md needed real files, and
+    was silently useless on GitHub -- its sanitiser strips data: URIs.
+    """
+    src = IMG % tag
+    if not os.path.exists(src):
+        return None, 0
+    os.makedirs(IMG_OUT, exist_ok=True)
+    dst = "%s/%s.webp" % (IMG_OUT, tag)
+    shutil.copyfile(src, dst)
+    return "img/%s.webp" % tag, os.path.getsize(dst)
 
 
 # ---- datapath block diagram, one per RTL variant -----------------------------
@@ -240,9 +254,9 @@ for t in trials:
     tag, ok = t["tag"], bool(t.get("metrics"))
     key = (tag, ok)
     if key not in PROSE: continue
-    img, n = b64(tag); total += n
+    img, n = extract(tag); total += n
     rows.append((t, PROSE[key], img))
-print("<!-- images embedded: %.1f MB raw -->" % (total/1048576.0))
+print("extracted %d layouts to %s/  (%.2f MB)" % (sum(1 for _,_,i in rows if i), IMG_OUT, total/1048576.0))
 
 def esc(s): return s
 out = []
@@ -540,7 +554,7 @@ for t, pr, img in rows:
     if img:
         cap = ('Routed die, all layers &mdash; %s&nbsp;&micro;m&sup2;, %s cells. Pink and cyan are the lower metal layers, green the vias; blue is unused routing track.'
                % (format(int(m["area_um2"]), ","), format(m["stdcells"], ",")))
-        W('<figure><img class="shot" src="data:image/webp;base64,%s" alt="Routed layout of trial X%dY%d" loading="lazy" decoding="async"><figcaption>%s</figcaption></figure>'
+        W('<figure><img class="shot" src="%s" alt="Routed layout of trial X%dY%d" loading="lazy" decoding="async"><figcaption>%s</figcaption></figure>'
           % (img, t["x"], t["y"], cap))
     W('</article>')
     nxt = rows[rows.index((t,pr,img))+1] if rows.index((t,pr,img))+1 < len(rows) else None
@@ -613,7 +627,7 @@ print("wrote experiments/report.html  %.2f MB" % (os.path.getsize("experiments/r
 #   3. Inline markup. PROSE is authored as HTML fragments; html2md() converts
 #      the small tag set actually used and collapses the source indentation.
 # =============================================================================
-import re as _re, shutil as _sh
+import re as _re
 
 IMGDIR = "experiments/img"
 
@@ -687,7 +701,6 @@ def mermaid(pipe, rdreg):
     return "\n".join(L)
 
 
-os.makedirs(IMGDIR, exist_ok=True)
 M = []
 A = M.append
 
@@ -709,8 +722,9 @@ A("| Flow | Yosys + OpenROAD, Nangate45 |")
 A("| Trials | 10 |")
 A("| RTL defects | 0 |")
 A("")
-A("> A styled standalone version with the same content is at "
-  "[`report.html`](report.html) — download and open it locally; GitHub shows HTML as source.")
+A("> A styled HTML version of this page can be built locally with "
+  "`python3 scripts/report.py` — it is not committed, because GitHub renders HTML as "
+  "source and this Markdown is the shareable form.")
 A("")
 
 A("## Headline")
@@ -780,10 +794,6 @@ for t, pr, _img in rows:
         A("")
     m, k = t.get("metrics"), t["knobs"]
     tag = t["tag"]
-    dst = "%s/%s.webp" % (IMGDIR, tag)
-    src = IMG % tag
-    if os.path.exists(src):
-        _sh.copyfile(src, dst)
     lim = "design-limited" if m["limiter_class"] == "reg->reg" else "**pad-limited**"
     A("#### X%d·Y%d — %s" % (t["x"], t["y"], html2md(pr["head"])))
     A("")

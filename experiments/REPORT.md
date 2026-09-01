@@ -13,7 +13,7 @@ Ten synthesis-and-place-and-route experiments on a 1,024-multiplier INT8 tile ma
 | Trials | 10 |
 | RTL defects | 0 |
 
-> A styled standalone version with the same content is at [`report.html`](report.html) — download and open it locally; GitHub shows HTML as source.
+> A styled HTML version of this page can be built locally with `python3 scripts/report.py` — it is not committed, because GitHub renders HTML as source and this Markdown is the shareable form.
 
 ## Headline
 

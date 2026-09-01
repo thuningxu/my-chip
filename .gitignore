@@ -16,3 +16,8 @@ __pycache__/
 
 # ORFS outputs + generated configs (WORK_HOME/DESIGN_HOME point here)
 work/
+
+# Generated locally by scripts/report.py from committed data in experiments/img/.
+# Not committed: GitHub renders HTML as source, so experiments/REPORT.md is the
+# shareable form. Regenerate with: python3 scripts/report.py
+experiments/report.html
