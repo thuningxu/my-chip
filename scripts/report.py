@@ -163,6 +163,78 @@ def b64(tag):
     raw = open(p, "rb").read()
     return base64.b64encode(raw).decode(), len(raw)
 
+
+# ---- datapath block diagram, one per RTL variant -----------------------------
+# Structure read directly from rtl/amx_tdpbssd.v, not from memory:
+#   b_row_c = b_flat[kcnt*512 +: 512]      16:1 mux, 512 bits, shared
+#   a_dw_c  = a_flat[gm*512 + kcnt*32 +: 32]  16:1 mux, 32 bits, per row
+#   PIPE>=3 registers BOTH mux outputs (b_row_r + a_dw_r)      1,024 flops
+#   prod[gb] = a_b * b_b                   four signed 8x8 -> 16
+#   PIPE>=2 registers the four products    16b x 4 x 256     16,384 flops
+#   sum4 = prod_e[0..3]                    18 bits, exact, no fold needed
+#   PIPE>=1 registers sum4                 18b x 256          4,608 flops
+#   raw = cacc + sum4_e (33b); ovf = raw[32]^raw[31]; folded = SAT ? rail : raw
+#   cacc[gm][gn]                           32b x 256          8,192 flops, ALWAYS
+#   RD_REG=1 registers rd_data AFTER the readback mux            512 flops
+# Cumulative flops reproduce every measured netlist count exactly, which is the
+# check that this diagram describes the hardware that was actually built.
+def st(t, sub, cls=""):
+    return '<div class="stage %s"><span class="t">%s</span><span class="s">%s</span></div>' % (cls, t, sub)
+def rg(on, lbl, n):
+    return ('<div class="reg %s"><span class="bar"></span><span class="lb">%s</span></div>'
+            % ("on" if on else "off", (lbl + " " + n) if on else lbl))
+ARW = '<div class="arw"></div>'
+
+def datapath(pipe, rdreg):
+    d = ['<div class="dpwrap"><div class="dp">']
+    d.append(st("a_flat / b_flat", "tiles &middot; 16,384 ff", "src"))
+    d.append(ARW)
+    d.append(st("16:1 MUX", "select k-step"))
+    d.append(rg(pipe >= 3, "S3", "1,024"))
+    d.append(st("8&times;8 MUL", "&times;4 per unit"))
+    d.append(rg(pipe >= 2, "S2", "16,384"))
+    d.append(st("&Sigma; TREE", "4:1, 18 b exact"))
+    d.append(rg(pipe >= 1, "S1", "4,608"))
+    d.append('<div class="loop"><span class="lp">&#8635; accumulate loop &mdash; irreducible</span>')
+    d.append(st("+ 33 b &rarr; FOLD", "ovf &rarr; clamp INT32"))
+    d.append(ARW)
+    d.append(st("cacc", "32 b &times; 256 &middot; 8,192 ff"))
+    d.append('</div></div></div>')
+    d.append('<div class="dpwrap"><div class="dp" style="min-width:520px">')
+    d.append(st("cacc &times; 256", "readback tap", "src"))
+    d.append(ARW)
+    d.append(st("5-LEVEL MUX", "row select"))
+    d.append(rg(rdreg == 1, "RD", "512"))
+    d.append(st("rd_data", "512 b output port"))
+    d.append('</div></div>')
+    return "".join(d)
+
+VARIANTS = [
+ (0,0,"PIPE=0 &mdash; one combinational path", 24584,
+  "Nothing between the mux and the accumulator. Every k-step selects operands, multiplies "
+  "1,024 products, sums them, adds 33 bits and clamps &mdash; all inside one clock. Glitches "
+  "from the mux propagate through the entire depth, which is why this variant burns 19&nbsp;W."),
+ (1,0,"PIPE=1 &mdash; register sum4", 29194,
+  "One boundary at S1 removes the mux, the multiply <em>and</em> the adder tree from the "
+  "accumulate path in a single move, for 4,608 flops. The cheapest large cut available, and the "
+  "one that cut power 19&times;."),
+ (2,0,"PIPE=2 &mdash; also register the products", 45579,
+  "S2 splits the multiply from the tree. By far the most expensive rung: 16,384 flops, two "
+  "thirds of the tile register file, for +100.6&nbsp;MHz."),
+ (3,0,"PIPE=3 &mdash; also register the mux outputs", 46604,
+  "S3 splits the 16:1 mux off the front of the multiply for only 1,024 flops &mdash; the "
+  "cheapest cut in the ladder and worth +117.6&nbsp;MHz at equal target. It also made the design "
+  "62,648 cells <em>smaller</em>, because repair buffering collapsed once the stage was short "
+  "enough not to need forcing into shape."),
+ (3,1,"PIPE=3 + RD_REG &mdash; register the readback", 47116,
+  "Not a datapath change. The readback mux had become the critical path, running combinationally "
+  "from an input pin to an output pin with no register to cancel clock insertion delay against. "
+  "RD places a flop after the mux for 512 flops, costing one cycle of readback latency and no "
+  "throughput."),
+]
+USED = {(0,0):"X1&middot;Y0", (1,0):"X1&middot;Y1, X2&middot;Y0", (2,0):"X2&middot;Y1, X2&middot;Y3",
+        (3,0):"X2&middot;Y2, X2&middot;Y4", (3,1):"X3&middot;Y0, X4&middot;Y0, X4&middot;Y1"}
+
 rows, total = [], 0
 for t in trials:
     tag, ok = t["tag"], bool(t.get("metrics"))
@@ -317,6 +389,42 @@ td.strike{color:var(--rose);text-decoration:line-through}
 .close p{font-size:15.5px;color:var(--ink-dim);max-width:74ch}
 .lastword{font-family:var(--cond);font-size:clamp(19px,2.6vw,26px);font-weight:600;
   line-height:1.35;color:var(--ink);max-width:56ch;border-left:2px solid var(--cyan);padding-left:20px}
+
+/* ---- datapath block diagram ---- */
+.designs{display:flex;flex-direction:column;gap:clamp(26px,3vw,40px)}
+.dsn{display:flex;flex-direction:column;gap:12px;border:1px solid var(--line);
+  border-radius:4px;background:var(--surface);padding:clamp(16px,2.2vw,24px)}
+.dsn-top{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.dsn-top .nm{font-family:var(--cond);font-size:19px;font-weight:700;letter-spacing:-.01em}
+.dsn-top .ff{font-family:var(--mono);font-size:12px;color:var(--muted)}
+.dsn-top .used{font-family:var(--mono);font-size:11px;color:var(--cyan);letter-spacing:.06em}
+.dpwrap{overflow-x:auto;padding:4px 0 2px}
+.dp{display:flex;align-items:stretch;gap:0;min-width:660px}
+.stage{flex:0 0 auto;display:flex;flex-direction:column;justify-content:center;gap:3px;
+  background:var(--sunk);border:1px solid var(--line);border-radius:3px;
+  padding:11px 13px;min-height:62px;text-align:center}
+.stage .t{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--ink);white-space:nowrap}
+.stage .s{font-family:var(--mono);font-size:10px;color:var(--muted);white-space:nowrap}
+.stage.src{background:transparent;border-style:dashed}
+.arw{flex:0 0 auto;align-self:center;width:20px;height:1px;background:var(--line);position:relative}
+.arw::after{content:"";position:absolute;right:0;top:-3px;border-left:5px solid var(--line);
+  border-top:3.5px solid transparent;border-bottom:3.5px solid transparent}
+/* register boundary: present = solid cyan pill, absent = faint dashed outline */
+.reg{flex:0 0 auto;align-self:stretch;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:4px;width:62px;margin:0 5px}
+.reg .bar{width:8px;flex:1 1 auto;min-height:44px;border-radius:4px}
+.reg .lb{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;white-space:nowrap}
+.reg.on .bar{background:var(--cyan)}
+.reg.on .lb{color:var(--cyan)}
+.reg.off .bar{background:transparent;border:1px dashed var(--line);width:8px}
+.reg.off .lb{color:var(--muted);opacity:.6}
+.loop{flex:0 0 auto;display:flex;align-items:stretch;gap:0;border:1px dashed var(--rose);
+  border-radius:4px;padding:8px;position:relative;margin-left:5px}
+.loop .lp{position:absolute;left:9px;bottom:-8px;background:var(--surface);padding:0 6px;
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;color:var(--rose);white-space:nowrap}
+.dp-legend{display:flex;gap:20px;flex-wrap:wrap;font-family:var(--mono);font-size:11px;color:var(--muted)}
+.dp-legend b{color:var(--cyan);font-weight:500}
+.dp-legend i{color:var(--rose);font-style:normal}
 :focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>''')
@@ -367,6 +475,29 @@ register-to-register figure. The correction was recovered from routed databases 
 every recovered slack matched its logged value to within 0.002&nbsp;ns &mdash; which is what makes it
 a correction rather than a guess. Nothing had to be re-measured.</p>
 </section>''')
+
+
+# ---- the designs -------------------------------------------------------------
+W('<section class="gen" style="padding-top:0"><div class="gen-top"><h2>The five designs</h2>'
+  '<p class="claim">Same datapath. The question was only where to cut it.</p></div>'
+  '<p class="detail">Every trial below is one of these five netlists measured at some clock target. '
+  'The chain from operand select to accumulator is fixed; what each pipeline level changes is where '
+  'a register boundary falls, and therefore how much logic has to settle within one cycle. '
+  'The accumulate loop cannot be cut &mdash; a saturating add must read its own previous result &mdash; '
+  'so it sets the floor no pipeline depth can go below.</p></section>')
+W('<div class="designs">')
+for pp, rr, nm, ff, blurb in VARIANTS:
+    W('<div class="dsn"><div class="dsn-top"><span class="nm">%s</span>'
+      '<span class="ff">%s flip-flops</span><span class="used">measured in %s</span></div>'
+      % (nm, format(ff, ","), USED[(pp, rr)]))
+    W('<p class="qa" style="font-size:14.5px;color:var(--ink-dim);max-width:78ch">%s</p>' % blurb)
+    W(datapath(pp, rr))
+    W('</div>')
+W('<p class="dp-legend"><span><b>&#9613;</b> register boundary present</span>'
+  '<span><span style="opacity:.6">&#9615;</span> boundary absent at this level</span>'
+  '<span><i>&#8635;</i> feedback loop, cannot be pipelined</span>'
+  '<span>flop counts are per boundary, whole design</span></p>')
+W('</div>')
 
 # plates grouped by generation
 seen = set()
