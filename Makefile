@@ -41,9 +41,18 @@ SAT    ?= 1
 # loop and no PIPE level shortens it -- see experiments/harness.md, X1.
 PIPE   ?= 0
 
-# amx_tdpbssd: 1 registers rd_data, moving the readback off the output-port path
-# where clock insertion delay cannot cancel. Costs a readback cycle, not throughput.
+# amx_tdpbssd and tpu_mmu: 1 registers rd_data, moving the readback off the
+# output-port path where clock insertion delay cannot cancel. Costs a readback
+# cycle, not throughput.
 RDREG  ?= 0
+
+# tpu_mmu array dimension. MACs = TN*TN, so TN=32 gives 1024 -- deliberately the
+# same multiplier count as amx_tdpbssd, which is what makes systolic-vs-broadcast
+# a controlled comparison instead of one across two scales.
+#
+# NOT called N. N is already mac_array's size, and reusing it would let a stray
+# `make measure DESIGN=tpu_mmu N=4` quietly build a 16-MAC array.
+TN     ?= 32
 
 -include local.mk
 
@@ -66,7 +75,8 @@ help:
 	@echo ""
 	@echo "  make sim             run the regression            (N=$(N))"
 	@echo "  make sim-amx         AMX TDPBSSD regression   (SAT=$(SAT) PIPE=$(PIPE))"
-	@echo "  make sim-matrix      both designs, all parameter states (14 configs)"
+	@echo "  make sim-tpu         TPU systolic regression  (TN=$(TN) RDREG=$(RDREG))"
+	@echo "  make sim-matrix      all designs, all parameter states (28 configs)"
 	@echo "  make sim-all         run the regression at N=4,8,16"
 	@echo "  make golden          run the Python reference model"
 	@echo ""
@@ -75,7 +85,7 @@ help:
 	@echo "                       $(BUILD)/schematic/<nick>/"
 	@echo ""
 	@echo "  make measure         sim-gated synth+P&R, print a QoR row"
-	@echo "                       (DESIGN=$(DESIGN) N=$(N) CPORT=$(CPORT) OUTPAR=$(OUTPAR)"
+	@echo "                       (DESIGN=$(DESIGN) N=$(N) TN=$(TN) CPORT=$(CPORT) OUTPAR=$(OUTPAR)"
 	@echo "                        SAT=$(SAT) PERIOD=$(PERIOD) UTIL=$(UTIL))"
 	@echo "  make gds             build+verify the GDS of a routed config"
 	@echo "  make path            worst timing path of the last measure -- WHY"
@@ -148,7 +158,12 @@ sim-matrix:
 	    && echo "  PASS  amx_tdpbssd SAT=$$s PIPE=$$p" \
 	    || { echo "  FAIL  amx_tdpbssd SAT=$$s PIPE=$$p"; exit 1; }; \
 	done; done
-	@echo "== all 20 configurations PASS =="
+	@for n in 4 8 16 32; do for r in 0 1; do \
+	  $(MAKE) --no-print-directory sim-tpu TN=$$n RDREG=$$r >/dev/null \
+	    && echo "  PASS  tpu_mmu     N=$$n RD_REG=$$r" \
+	    || { echo "  FAIL  tpu_mmu     N=$$n RD_REG=$$r"; exit 1; }; \
+	done; done
+	@echo "== all 28 configurations PASS =="
 
 .PHONY: sim-amx
 # The AMX regression. Separate target rather than a DESIGN switch on `sim`,
@@ -164,10 +179,24 @@ sim-amx: $(BUILD)
 	@grep -q '^RESULT: PASS' $(BUILD)/sim_amx_s$(SAT)_p$(PIPE).log \
 	  || { echo "AMX regression FAILED"; exit 1; }
 
+.PHONY: sim-tpu
+# The systolic regression. Separate target for the same reason sim-amx is: the
+# testbenches take different parameters, and silently accepting a parameter a
+# design does not have would be worse than refusing it.
+sim-tpu: $(BUILD)
+	@echo "== TPU MMU regression N=$(TN) RD_REG=$(RDREG) =="
+	@$(IVERILOG) -g2005 -o $(BUILD)/tb_tpu_n$(TN)_r$(RDREG).vvp \
+	  -Ptb_tpu_mmu.N=$(TN) -Ptb_tpu_mmu.RD_REG=$(RDREG) \
+	  tb/tb_tpu_mmu.v rtl/tpu_mmu.v
+	@vvp $(BUILD)/tb_tpu_n$(TN)_r$(RDREG).vvp | tee $(BUILD)/sim_tpu_n$(TN)_r$(RDREG).log
+	@grep -q '^RESULT: PASS' $(BUILD)/sim_tpu_n$(TN)_r$(RDREG).log \
+	  || { echo "TPU regression FAILED"; exit 1; }
+
 .PHONY: golden
 golden:
 	@$(PYTHON) tb/golden.py --n $(N) --k 37 --seed 1
 	@$(PYTHON) tb/amx_golden.py
+	@$(PYTHON) tb/tpu_golden.py
 
 #-----------------------------------------------------------------------------
 # Schematics. Not gated on sim: these are drawings of the RTL, not claims about
@@ -184,20 +213,20 @@ schematic:
 measure: require-setup
 	@ORFS="$(ORFS)" YOSYS_EXE="$(YOSYS_EXE)" KLAYOUT_CMD="$(KLAYOUT_CMD)" \
 	  ./scripts/measure.sh -d $(DESIGN) -n $(N) -c $(CPORT) -r $(OUTPAR) -s $(SAT) -R $(RDREG) \
-	     -p $(PERIOD) -u $(UTIL) $(if $(TAG),-t $(TAG),)
+	     -T $(TN) -p $(PERIOD) -u $(UTIL) $(if $(TAG),-t $(TAG),)
 
 # Build/rebuild the GDS for an already-routed config, without re-running the
 # flow. measure.sh does this inline now; this is for configs routed before that
 # fix, or to regenerate. Verifies the stream, it does not just check the file.
 .PHONY: gds
 gds: require-setup
-	@./scripts/gds.sh -d $(DESIGN) -n $(N) -c $(CPORT) -r $(OUTPAR) -s $(SAT) $(if $(TAG),-t $(TAG),)
+	@./scripts/gds.sh -d $(DESIGN) -n $(N) -c $(CPORT) -r $(OUTPAR) -s $(SAT) -T $(TN) $(if $(TAG),-t $(TAG),)
 
 # Why the clock is what it is. Requires a completed `make measure N=<N>`.
 .PHONY: path
 path: require-setup
 	@./scripts/report_path.sh -d $(DESIGN) -n $(N) --cport $(CPORT) --outpar $(OUTPAR) \
-	     --sat $(SAT) $(if $(TAG),-t $(TAG),)
+	     --sat $(SAT) -T $(TN) $(if $(TAG),-t $(TAG),)
 
 .PHONY: sweep-period
 sweep-period: require-setup

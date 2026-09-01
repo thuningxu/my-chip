@@ -7,16 +7,18 @@ The deliverable is **not** the chip. It is `EXPERIMENTS.md` — a table of
 measured, reproducible rows where every row is one idea, and every number says
 what kind of number it is.
 
-Two designs live here, selected with `DESIGN=`:
+Three designs live here, selected with `DESIGN=`:
 
 | design | what | scale |
 |---|---|---|
 | **`mac_array`** (default) | INT4 outer-product MAC array. The v0 baseline, deliberately the simplest *correct* design. `D = init + A@B` with three init modes and two readout modes | 16 mult at N=4, 256 at N=16 |
 | **`amx_tdpbssd`** | **Intel AMX `TDPBSSD`** — INT8 tile dot-product, `C += A@B` on `(16,64)@(64,16)`, 16,384 MACs, with optional INT32 saturation | 1024 mult, 16 cycles |
+| **`tpu_mmu`** | **TPU v1-style weight-stationary systolic array** — `C += A@W`, N×N, INT8. Built at `TN=32` because 32×32 = 1024 multipliers is *exactly* `amx_tdpbssd`'s count, which makes systolic-vs-broadcast a controlled comparison rather than one across scales | 1024 mult at TN=32, 3N cycles |
 
 ```bash
-make sim-matrix                          # both designs, all parameter states
+make sim-matrix                          # all designs, all parameter states (28)
 make measure DESIGN=amx_tdpbssd SAT=1    # synth + P&R one of them
+make measure DESIGN=tpu_mmu TN=32 RDREG=1
 ```
 
 ## Prerequisites
@@ -78,8 +80,12 @@ my-chip/
 ├── Makefile             # sim / measure / sweep / clean targets
 ├── local.mk             # generated, gitignored, machine-specific tool paths
 ├── rtl/mac_array.v      # v0 baseline: parameterised N x N INT4 outer-product MAC
+├── rtl/amx_tdpbssd.v    # Intel AMX TDPBSSD, 1024 INT8 MACs, broadcast array
+├── rtl/tpu_mmu.v        # TPU v1-style weight-stationary systolic array
 ├── tb/tb_mac_array.v    # self-checking regression, 22 cases, PASS at N=4/8/16
 ├── tb/golden.py         # independent Python reference + accumulator-width checker
+├── tb/amx_golden.py     # 4th model for TDPBSSD: VNNI pack/unpack, both SAT modes
+├── tb/tpu_golden.py     # cycle-accurate systolic model + the SCHEDULE PROOF
 ├── flow/nangate45/
 │   ├── config.mk.in     # ORFS config TEMPLATE -- the single definition
 │   └── constraint.sdc.in# SDC TEMPLATE. Edit these; never the generated copies.

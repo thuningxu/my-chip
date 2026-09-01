@@ -1,6 +1,6 @@
 # tb/ — verification
 
-Four files, two designs, and a deliberate independence structure:
+Six files, three designs, and a deliberate independence structure:
 
 | File | Role |
 |---|---|
@@ -8,6 +8,28 @@ Four files, two designs, and a deliberate independence structure:
 | `golden.py` | a **second opinion** on `mac_array` + the accumulator-width checker |
 | `tb_amx_tdpbssd.v` | the `amx_tdpbssd` (Intel `TDPBSSD`) regression — **three** models in one file |
 | `amx_golden.py` | a **fourth** opinion on TDPBSSD: VNNI pack/unpack and both saturation modes |
+| `tb_tpu_mmu.v` | the `tpu_mmu` systolic regression — 12 cases plus a cross-language tie |
+| `tpu_golden.py` | the systolic **schedule proof** — a cycle-accurate model that threads the output row index through the array and asserts every contribution to one accumulator came from the same row |
+
+`tpu_golden.py` splits its models by **kind, not language**, and the reason is the
+rule stated in `amx_golden.py`: three models that agree are evidence, two models
+where one is derived from the other are one model. A Verilog transliteration of the
+Python systolic model would be the same model typed twice, agreeing because it
+shares every assumption including a wrong one. So the Verilog testbench carries the
+*textbook* model (which knows nothing about time or skew) and the Python carries the
+*cycle-accurate* one, tied together by hardcoded constants in case T3.
+
+That split paid immediately. The output placement has **three** different correct
+forms depending on where you sample:
+
+| | form |
+|---|---|
+| hand algebra | `m = t − j − N` |
+| the Python model, which emits after the state update | `m = t − j − (N−1)` |
+| the RTL, which reads `p_reg` as a register one cycle later | `ccnt == m + j + N` |
+
+None is the others' typo. Writing the Python model *first* meant finding that in
+seconds instead of while debugging Verilog.
 
 `tb_amx_tdpbssd.v` carries three models rather than one because the AMX tile
 layout has two independent ways to be wrong:

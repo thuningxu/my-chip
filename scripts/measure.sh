@@ -30,6 +30,9 @@ OUTPAR=0
 SAT=1
 PIPE=0
 RDREG=0
+# tpu_mmu array dimension. Named TN, not N: N is already mac_array's size and
+# silently reusing it would let `-n 4` build a 16-MAC systolic array by accident.
+TN=32
 PERIOD=1.00
 UTIL=40
 TAG=""
@@ -47,6 +50,7 @@ while [[ $# -gt 0 ]]; do
     -s) SAT="$2"; shift 2 ;;
     -P) PIPE="$2"; shift 2 ;;
     -R) RDREG="$2"; shift 2 ;;
+    -T) TN="$2"; shift 2 ;;
     -p) PERIOD="$2"; shift 2 ;;
     -u) UTIL="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
@@ -81,8 +85,16 @@ case "$DESIGN" in
                 -Ptb_amx_tdpbssd.RD_REG="$RDREG")
     CFG_DESC="SAT=$SAT PIPE=$PIPE RD_REG=$RDREG"
     ;;
+  tpu_mmu)
+    NICK="$(nick_tpu "$TN" "$TAG")"
+    RTL_LIST="$HERE/rtl/tpu_mmu.v"
+    TB_FILE="$HERE/tb/tb_tpu_mmu.v"
+    TOP_PARAMS="N $TN RD_REG $RDREG"
+    SIM_PARAMS=(-Ptb_tpu_mmu.N="$TN" -Ptb_tpu_mmu.RD_REG="$RDREG")
+    CFG_DESC="N=$TN RD_REG=$RDREG"
+    ;;
   *)
-    echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd" >&2
+    echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd, tpu_mmu" >&2
     exit 2 ;;
 esac
 
@@ -247,9 +259,9 @@ if [[ ! -s "$R" ]]; then
   echo "FATAL: no metrics at $R" >&2
   exit 1
 fi
-python3 - "$R" "$DRC" "$N" "$PERIOD" "$UTIL" "$NICK" <<'PY'
+python3 - "$R" "$DRC" "$CFG_DESC" "$PERIOD" "$UTIL" "$NICK" <<'PY'
 import json, os, sys
-rpt, drc, n, period, util, nick = sys.argv[1:7]
+rpt, drc, cfg, period, util, nick = sys.argv[1:7]
 d = json.load(open(rpt))
 def g(k, default=0.0):
     return d.get(k, default)
@@ -262,9 +274,13 @@ drc_n = 0
 if os.path.exists(drc):
     drc_n = sum(1 for _ in open(drc))
 print()
-print("| design | N | period | setup WS | TNS | hold WS | implied fmax | DRC | stdcells | flip-flops | area um2 | power W |")
+# "config", not "N". The column used to print $N regardless of design, so a
+# tpu_mmu row built at TN=32 was labelled N=4 while its artifact name and
+# VERILOG_TOP_PARAMS were both correct -- a metrics table mislabelling its own
+# configuration, which is the exact class of defect this project keeps finding.
+print("| design | config | period | setup WS | TNS | hold WS | implied fmax | DRC | stdcells | flip-flops | area um2 | power W |")
 print("|---|---|---|---|---|---|---|---|---|---|---|---|")
-print(f"| {nick} | {n} | {per:.2f} ns | {ws:+.4f} | {tns:.3f} | {hold:+.4f} | "
+print(f"| {nick} | {cfg} | {per:.2f} ns | {ws:+.4f} | {tns:.3f} | {hold:+.4f} | "
       f"{fmax:.0f} MHz | {drc_n} | {int(g('finish__design__instance__count__stdcell'))} | "
       f"{int(g('finish__design__instance__count__class:sequential_cell'))} | "
       f"{int(g('finish__design__instance__area__stdcell'))} | {g('finish__power__total'):.4f} |")

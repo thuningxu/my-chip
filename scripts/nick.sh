@@ -43,6 +43,16 @@ nick_amx() {
     printf 'amx_s%s%s' "${1:-1}" "${2:+_$2}"
 }
 
+# tpu_mmu: the array dimension is the only thing that changes the hardware size,
+# so it is the only field in the name. RD_REG deliberately does NOT appear -- it
+# adds one register and no geometry, and putting it in the name would fork every
+# artifact directory for a knob that is measured, not swept. Distinct `tpu_`
+# prefix keeps these clear of my_chip_* and amx_*.
+#   nick_tpu <N> [TAG]
+nick_tpu() {
+    printf 'tpu_n%s%s' "${1:-32}" "${2:+_$2}"
+}
+
 # List the nicknames that actually exist, for error messages. A "missing
 # directory" error that shows what IS there turns a silent mismatch into an
 # obvious one.

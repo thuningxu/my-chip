@@ -4,11 +4,22 @@
 |---|---|---|
 | `mac_array.v` | INT4 outer-product MAC array — the **v0 baseline**, deliberately the simplest *correct* design so there is somewhere to climb from | 16 multipliers at N=4 |
 | `amx_tdpbssd.v` | **Intel AMX `TDPBSSD`** — INT8 tile dot-product, `C += A@B`, with optional INT32 saturation | 1024 multipliers, 16 cycles |
+| `tpu_mmu.v` | **TPU v1-style weight-stationary systolic array** — `C += A@W`, N×N INT8, weights resident in the PEs, accumulators outside the array | 1024 multipliers at `N=32`, 3N cycles |
 
-The two are independent top-level modules with no shared code. `measure.sh -d`
+All three are independent top-level modules with no shared code. `measure.sh -d`
 selects which one to build, and each is passed only its own file — the ORFS
 config used to glob `rtl/*.v`, which meant a syntax error in one broke synthesis
 of the other.
+
+`amx_tdpbssd` and `tpu_mmu` are deliberately the **same arithmetic at opposite
+architectures**, 1024 INT8 multipliers each:
+
+| | `amx_tdpbssd` | `tpu_mmu` at `N=32` |
+|---|---|---|
+| operand delivery | **broadcast** — one 512-bit row fans out to 16 units, each through a 16:1 mux | **systolic** — every hop register-to-register between neighbours, nothing fanning out past one cell |
+| accumulator | **inside** the cell, so its feedback loop cannot be pipelined at any depth | **outside** the array, so the array is pure feed-forward and the only feedback is one adder |
+| a unit is | 4 multipliers + a 3-level tree + a saturating fold, all in the loop | 1 multiplier + 1 adder + 1 flop |
+| cycles / operation | 17 + `PIPE` | 3N (fill and drain are 2N−2 of it) |
 
 ---
 

@@ -687,3 +687,146 @@ still produces a plausibly-sized file, so existence is not correctness.
 `make gds` builds one for an already-routed config straight from `6_final.def`,
 without re-running synthesis, placement or routing — which is how the v0 row got
 its layout without rebuilding the pre-addend RTL.
+
+---
+
+## Results — tpu_mmu
+
+TPU v1-style **weight-stationary systolic array**: `C += A @ W`, all N×N, signed
+INT8 × signed INT8 accumulating into INT32, wrapping. Weights resident in the PEs,
+activations marching in from the left, partial sums marching down, accumulators
+**outside** the array. Built at `N=32` because 32×32 = **1024 multipliers is
+exactly `amx_tdpbssd`'s count** — matched arithmetic is what makes this a controlled
+comparison instead of one across two scales, which is the error the amx campaign
+spent a day retracting.
+
+Reference for the architecture: Jouppi et al., ISCA 2017 — 256×256 = 65,536 INT8
+MACs, 700 MHz, 92 TOPS, 75 W TDP, 28 nm, <331 mm². Verified against the paper, not
+recalled.
+
+| # | Design | Stage | Period | Setup WS | reg→reg fmax | Limiter | DRC | Hold WS | Cycles/op | stdcells | flip-flops | area µm² | power W |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| t1 | `tpu_mmu` `N=32 RD_REG=1` | routed | 1.40 ns | **−0.1502** | **645.1 MHz** | `reg→reg` | **0** | **−0.0278** | 96 (sim) | 915,078 | 83,307 | 1,653,910 | 2.2322 |
+
+Flop count predicted **83,851** before the run, actual **83,307** — off by 544
+(0.65%). The breakdown: `acc` 32,768 + `p_reg` 21,504 + `a_reg` 8,192 + weights
+8,192 + A tile 8,192 + input skew 3,968 + `rd_data` 1,024 + control.
+
+### Head-to-head at matched arithmetic
+
+Both rows at **1.40 ns**, both **1024 INT8 MACs**. Equal target and equal MAC count
+is the only comparison this project treats as valid.
+
+| | amx broadcast | tpu systolic | ratio |
+|---|---|---|---|
+| reg→reg fmax | 698.9 MHz | 645.1 MHz | **0.92×** |
+| flip-flops | 47,116 | 83,307 | 1.77× |
+| std cells | 532,445 | 915,078 | 1.72× |
+| area µm² | 1,046,050 | 1,653,910 | 1.58× |
+| power W | 2.436 | **2.232** | **0.92×** |
+| hold | +0.0386 met | −0.0278, **180 viol** | — |
+
+**Power is 8% LOWER with 1.77× the flip-flops and 1.72× the cells.** Neighbour-only
+communication pays for itself in switching energy even at this size — the one
+prediction about this architecture that held.
+
+### The hypothesis is NOT yet tested, and the path report says why
+
+I predicted the systolic array would clock materially faster because no PE sees
+more than one multiply and one add. It came in **slower**, and the reason is not the
+architecture:
+
+```
+ccnt[0] -> 4 buffers -> MUX2 x5 -> AND2 -> AND2 -> FA chain -> p_reg[0][15]
+```
+
+The critical path starts at the **cycle counter**, runs through a **32:1
+row-select mux**, and lands in the multiplier's carry chain. That is
+`a_flat[ccnt*N*8 +: N*8]` — the operand mux at the array's input edge, left
+**combinational**. The PE-to-PE path (`a_reg → mul → add → p_reg`) never became
+critical, so the systolic structure has not been measured at all.
+
+This is the **same defect as amx's**, and I walked into it after writing a comment
+in this very file about avoiding a mux on the array's input edge. The fix is the
+amx `S3` lesson verbatim: register `a_row`, cutting 5 mux levels off the front of
+the multiply for ~256 flops.
+
+### Throughput is the bigger problem, and it is architectural
+
+| | amx | tpu N=32 |
+|---|---|---|
+| MACs / operation | 16,384 | 32,768 |
+| cycles / operation | 20 | **96** |
+| **array utilisation** | **80.0%** | **33.3%** |
+| fill/drain cycles | 4 | **64** |
+| as built, back-to-back | **572.5 GMAC/s** | **220.2 GMAC/s** |
+| peak datapath | 715.7 GMAC/s | 660.6 GMAC/s |
+| efficiency, as built | 235.0 GMAC/s/W | 98.6 GMAC/s/W |
+| **efficiency, at peak** | **293.8 GMAC/s/W** | **295.9 GMAC/s/W** |
+
+A systolic array costs `2N−2` cycles of ramp. At N=32 that is **64 cycles of a
+96-cycle operation**, against amx's 4 of 20. The two designs are within **1%** of
+each other at peak (295.9 vs 293.8 GMAC/s/W), which says the arithmetic is
+comparably efficient and the entire 2.6× throughput gap is utilisation.
+
+What the architecture is actually for is weight reuse — `M` activation rows against
+one resident `W`, giving `M·N²` MACs in `M + 2N − 2` cycles:
+
+| M | GMAC/s | utilisation |
+|---|---|---|
+| 32 (as built) | 224.9 | 34.0% |
+| 128 | 445.0 | 67.4% |
+| 256 | 531.8 | 80.5% |
+| 1024 | 622.9 | 94.3% |
+| 4096 | 650.7 | 98.5% |
+
+**The FSM only does M=N.** It reloads A and re-ramps on every operation, so it sits
+permanently at the left end of that table. The capability is structural in the array
+— the weights are already stationary — but the control does not expose it. This is
+precisely why TPU v1 pairs a 256×256 array with a 24 MiB activation buffer: at
+N=256 the ramp is 510 cycles, so streaming thousands of rows per weight load is not
+an optimisation, it is the only way the array is worth building.
+
+### HOLD IS VIOLATED — this row is not signoff-clean
+
+−0.0278 ns over **180 endpoints**. No clock period fixes a min-delay failure. The
+amx campaign closed the identical problem with `HOLD_SLACK_MARGIN=0.05` and **no RTL
+change**, and that was not tried here. Treat t1 as a measurement of the datapath,
+not as a buildable configuration.
+
+### What is verified, independent of any PPA number
+
+- **28/28** `sim-matrix` configurations, `tpu_mmu` at N=4/8/16/32 × `RD_REG`=0/1
+- `tpu_golden.py`: the schedule proof (provenance tags through the array), model
+  agreement, the exact `16 + clog2(N)` psum bound driven to `N × 16384`, `C +=`
+  chains, and **negative tests** — wrong placement by ±1 row and a transposed
+  weight load must both be *detected*, or the value checks prove nothing
+- **8 RTL mutations, each caught**: skew reversed, accumulate one cycle early and
+  one late, weights transposed, psum one bit narrow, accumulator indices swapped,
+  multiply using its own register instead of the arriving operand, sign-extension
+  dropped
+
+### Three things found by testing rather than reasoning
+
+1. **The output-placement algebra was off by one.** Hand derivation gives
+   `m = t − j − N`; the register-level model gives `m = t − j − (N−1)`; the RTL
+   needs a third form again (`ccnt == m + j + N`) because it samples `p_reg` a cycle
+   after the model emits. Writing the Python model first found this in seconds.
+2. **A comment of mine asserted something false.** I claimed the `ccnt < N` bound on
+   the A row select prevents corrupting the tail sums. It does not — removing it
+   passes every test at every N, because the activation `PE(i,j)` consumes at cycle
+   `t` is `A[t−i−j][i]` and `t−i−j` *is* the output row, so out-of-range activations
+   only feed partial sums no accumulator is ever enabled for. The bound is an **area**
+   guard: a mux over N rows instead of 3N−1.
+3. **The `SYNTH_MEMORY_MAX_BITS` risk was real but does not bite.** `a_reg`, `p_reg`
+   and `acc` are all reported as "Replacing memory with list of registers" and
+   **zero `$mem` cells survive at N=32**, because every write is constant-index.
+   Checked before starting a flow rather than after one failed.
+
+### Reporting defect found while writing this up
+
+`measure.sh`'s QoR row prints the `N` column from mac_array's `N` variable, so the
+t1 row came out labelled `N=4` when the design was built at `TN=32`. The artifact
+name (`tpu_n32`) and `VERILOG_TOP_PARAMS` were both correct, so only the printed
+row was wrong — but a metrics table that mislabels its own configuration is exactly
+the class of defect this log exists to catch. Fixed.
