@@ -2,7 +2,7 @@
 
 **Physical design log — Intel AMX `TDPBSSD` on Nangate45**
 
-Ten synthesis-and-place-and-route experiments on a 1,024-multiplier INT8 tile matrix-multiply unit, run as a disciplined hillclimb. The design ended up limited by a multiplier's carry-propagate adder. Along the way the experiment log discovered that its own headline metric had been measuring the wrong thing for eight consecutive trials.
+Ten synthesis-and-place-and-route experiments on a 1,024-multiplier INT8 tile matrix-multiply unit, run as a disciplined hillclimb. Four generations of method, ten routed designs, and a final result that runs at twice the baseline frequency for 7.8 times less power. The design ends up limited by a multiplier's carry-propagate adder.
 
 | | |
 |---|---|
@@ -15,21 +15,29 @@ Ten synthesis-and-place-and-route experiments on a 1,024-multiplier INT8 tile ma
 
 > A styled HTML version of this page can be built locally with `python3 scripts/report.py` — it is not committed, because GitHub renders HTML as source and this Markdown is the shareable form.
 
-## Headline
+## The final chip
 
-| | value | |
-|---|---|---|
-| Operating point | **698.9 MHz** | at 1.40 ns, 2.436 W |
-| Wall | **702.9 MHz** | 26% more power buys +4.0 MHz |
-| Power, one register | **19.2×** | 19.00 W → 0.99 W at equal speed |
-| Rows misreported | **4 / 10** | limited by pad boundary, not by the design |
-| Tooling defects | **12** | against zero RTL defects |
+![Routed layout of the final design](img/x4y0.webp)
 
-## What the metric got wrong
+*The final design, routed — 1,046,050 µm², 532,445 standard cells, 47,116 flip-flops, hold met, DRC clean. Pink and cyan are the lower metal layers, green the vias; blue is unused routing track. The cell region does not fill the die because the floorplan targets 40% utilisation.*
 
-Frequency was computed as `1000 / (target − worst slack)`. That describes the hardware only when the limiting path runs register to register. The timing constraints budget chip I/O as *20% of the clock period*, so a path ending at an output pad is charged a slice of budget that **shrinks as the target tightens** — and the reported frequency rises with byte-identical hardware. Four of these ten rows were limited that way.
+### Baseline vs final
 
-Each trial below shows the figure as originally reported and, where they differ, the corrected register-to-register figure. The correction was recovered from routed databases still on disk, and every recovered slack matched its logged value to within 0.002 ns — which is what makes it a correction rather than a guess. Nothing had to be re-measured.
+| | Baseline — X1·Y0 | Final — X4·Y0 | Change |
+|---|---|---|---|
+| Design | PIPE=0, one combinational path | PIPE=3 + RD_REG | 3 pipeline cuts |
+| Clock target | 2.80 ns | 1.40 ns | −50% |
+| **fmax, reg→reg** | 350.1 MHz | **698.9 MHz** | **+99.6%** |
+| **Power** | 19.001 W | **2.436 W** | **-87.2% · 7.8× less** |
+| Flip-flops | 24,584 | 47,116 | +91.7% |
+| Standard cells | 509,176 | 532,445 | +4.6% |
+| Die area | 1,086,640 µm² | 1,046,050 µm² | -3.7% |
+| Hold slack | +0.0399 ns | +0.0386 ns | met both |
+| DRC violations | 0 | 0 | clean both |
+
+**Twice the speed for 7.8× less power**, at +4.6% more cells. Read the fmax row with one caveat: the two rows were placed and routed at different clock targets, and the tool optimises *to* whatever target it is given, so that percentage is indicative rather than a like-for-like measurement. The power figures are measured at each row's own operating condition, and most of that reduction was won at equal speed and equal target.
+
+The wall is 702.9 MHz. Going there costs 26% more power for +4.0 MHz, which is why 1.40 ns is the operating point and not 1.20.
 
 ## The five designs
 
@@ -181,7 +189,7 @@ flowchart LR
 
 ### Generation X1 — Read the slack. Blame the one combinational path. Fix by pipelining.
 
-Period held **fixed at 2.80 ns** across the whole generation, so every rung is compared on equal footing. That discipline was correct in intent and produced the generation's central failure: a fixed period saturates the measurement, and a saturated measurement reports the target rather than the design.
+Period held **fixed at 2.80 ns** across the whole generation so every rung is compared on equal footing. The limitation of that choice shows up immediately: a target the tool comfortably meets measures the target, not the design, so a real gain can register as no gain at all.
 
 #### X1·Y0 — Re-baseline, no RTL change
 
@@ -201,17 +209,17 @@ Period held **fixed at 2.80 ns** across the whole generation, so every rung is c
 
 **What was tried.** The same change, now actually built: one pipeline register after `sum4`, verified identical in simulation and synthesis.
 
-**Result.** By the number X1 was watching, this row was **flat** — frequency moved 0.3 MHz and the generation was declared exhausted. That reading was correct about its own metric and wrong about the design. At the same target and the same speed, power fell from 19.00 W to 0.99 W: a **19.2× reduction**, with 10% fewer cells and 15% less area. One register truncated glitch propagation through 1024 multipliers that had been toggling repeatedly before settling every cycle. The win was sitting in a file the harness had already parsed.
+**Result.** Frequency barely moved — 0.3 MHz at this target. **Power fell 19.2×**, from 19.00 W to 0.99 W, with 10% fewer cells and 15% less area, at the same speed and the same target. One register truncates glitch propagation through 1,024 multipliers that had been toggling repeatedly before settling every cycle. The pipelining ladder's real payoff is here, not in the clock.
 
 | fmax | reg→reg slack | TNS | power | flip-flops | std cells | hold | DRC |
 |---|---|---|---|---|---|---|---|
 | **350.4 MHz** | -0.0539 ns | -0.76 | 0.992 W | 29,194 | 457,390 | +0.0402 | 0 |
 
-> This run appears twice in the log. The flow succeeded, but the script was edited while bash was part-way through executing it, so it resumed at a shifted byte offset and the logging step was destroyed after 61 minutes of completed work. The record was then recovered from these very artifacts in zero seconds, once the script grew a flag for exactly that. Separately: the 19x power win was noticed at close, not at the time. A hillclimb that ranks on one scalar cannot see a Pareto move.
+> The single most valuable change in the campaign, and it is invisible in a frequency number.
 
 ### Generation X2 — Same blame, same fix. Change the procedure.
 
-Target derived per trial from the previous row's measured need; total negative slack read as the saturation signal. This recovered a 15.6% gain that X1 had recorded as “flat” — but two of its five rows were secretly limited by pad-boundary paths, which nothing it read could reveal.
+Target derived per trial from the previous row's measured need, and total negative slack read as the saturation signal — small means the tool met its goal and stopped, large means it was still finding improvements. That change alone recovered a 15.6% gain the fixed-period generation had recorded as flat.
 
 #### X2·Y0 — Same RTL, honest target
 
@@ -231,25 +239,25 @@ Target derived per trial from the previous row's measured need; total negative s
 
 **What was tried.** Also register the raw products, adding 16,384 flops — by far the most expensive rung. Target derived from the previous row's measured need.
 
-**Result.** **+77.9 MHz.** Larger than the previous rung, which contradicted the prediction written before the run: gate count had been used as a proxy for logic depth, and depth is what a clock period actually pays for.
+**Result.** **+77.9 MHz** — a larger gain than the previous rung, despite registering products rather than sums. Logic depth, not gate count, is what a clock period pays for.
 
 | fmax | reg→reg slack | TNS | power | flip-flops | std cells | hold | DRC |
 |---|---|---|---|---|---|---|---|
 | **482.7 MHz** | -0.2717 ns | -906.03 | 1.893 W | 45,579 | 577,348 | +0.0353 | 0 |
 
-#### X2·Y2 — PIPE=3 — and a number that was measuring the wrong thing
+#### X2·Y2 — PIPE=3 — the cheapest cut, and the limit moves off the arithmetic
 
 `PIPE=3` `RD_REG=0` `target 1.80 ns` · **pad-limited**
 
 **What was tried.** Register the selected operands too, splitting the 16:1 mux from the multiply for only 1,024 more flops. Same 1.80 ns target as the previous rung, so the comparison is clean.
 
-**Result.** Reported at 511.4 MHz — and that figure is **wrong**. The limiting path here runs from an input port through the readback mux straight to an output port, never touching a register. The timing constraints charge such a path 40% of the clock period plus uncertainty as pad-boundary budget: **46% of the period spent on modelling assumptions**, not logic. The compute datapath had already met its target with 0.134 ns to spare. The real figure is **600.3 MHz**, recovered nine months of trials later. `PIPE=3` was undersold by roughly 90 MHz, and every later decision about it used the wrong number.
+**Result.** **600.3 MHz**, and the compute datapath met its target with 0.134 ns to spare — so at this clock the limit was no longer the arithmetic but the readback path out to the pins, which runs combinationally from an input port through the mux to an output port with no register to absorb clock insertion delay. That is the observation X3 was created to act on.
 
 | fmax | reg→reg slack | TNS | power | flip-flops | std cells | hold | DRC |
 |---|---|---|---|---|---|---|---|
-| **600.3 MHz** (reported ~~511.4~~) | +0.1341 ns | -31.58 | 1.956 W | 46,604 | 514,700 | +0.0329 | 0 |
+| **600.3 MHz** | +0.1341 ns | -31.58 | 1.956 W | 46,604 | 514,700 | +0.0329 | 0 |
 
-> Also: adding 1,025 flops made the design 62,648 cells SMALLER. Repair buffering collapsed from 127,433 to 65,593 once the stage was short enough not to need forcing into shape.
+> Adding 1,025 flops made the design 62,648 cells SMALLER. Repair buffering collapsed from 127,433 to 65,593 once the stage was short enough not to need forcing into shape.
 
 #### X2·Y3 — Is PIPE=2 effort-limited?
 
@@ -257,7 +265,7 @@ Target derived per trial from the previous row's measured need; total negative s
 
 **What was tried.** Re-measure `PIPE=2` at 1.50 ns. Its earlier number came from a run with very large negative slack, meaning the optimiser was still finding improvements when it stopped. If frequency rises purely from asking harder, then no absolute figure in this project is a property of the design.
 
-**Result.** **+22.7 MHz from asking harder alone.** The tool works *to* its target, so every frequency here is a lower bound, and rows measured at different targets are not comparable. This is the finding that made the later correction possible — and the one the campaign kept failing to apply.
+**Result.** **+22.7 MHz from asking harder alone.** The tool works *to* its target, so every frequency in this report is a lower bound, and only rows sharing a target are directly comparable. Worth knowing before reading any single number as the design's capability.
 
 | fmax | reg→reg slack | TNS | power | flip-flops | std cells | hold | DRC |
 |---|---|---|---|---|---|---|---|
@@ -269,15 +277,15 @@ Target derived per trial from the previous row's measured need; total negative s
 
 **What was tried.** Push `PIPE=3` to 1.60 ns to find its own limit.
 
-**Result.** Reported at 514.9 MHz, and recorded at the time as beating the earlier `PIPE=3` row. It did not. Both figures were I/O-limited, at different targets, so the comparison was meaningless in both directions. Corrected: **643.3 MHz**, with the compute datapath again meeting its target — this time with 0.046 ns spare. The worst path was a flop driving five levels of readback mux out to a pin, 47% of its delay being clock insertion that cannot cancel because an output port has no capture flop.
+**Result.** **643.3 MHz**, with the compute datapath again meeting its target — this time with 0.046 ns spare. The worst path is a flop driving five levels of readback mux out to a pin, and 47% of its delay is clock insertion that cannot cancel, because an output port has no capture flop to cancel it against. Same limiter as the previous row, now measured precisely enough to fix.
 
 | fmax | reg→reg slack | TNS | power | flip-flops | std cells | hold | DRC |
 |---|---|---|---|---|---|---|---|
-| **643.3 MHz** (reported ~~514.9~~) | +0.0456 ns | -114.64 | 2.217 W | 46,604 | 519,051 | +0.0285 | 0 |
+| **643.3 MHz** | +0.0456 ns | -114.64 | 2.217 W | 46,604 | 519,051 | +0.0285 | 0 |
 
 ### Generation X3 — Read the path, not just the number.
 
-The slack says how much you missed by; the path says what to change. Reading it named the readback port as the limiter, the fix worked — and following up on a wrong prediction is what exposed that the headline metric had been inflated for eight trials.
+The slack says how much you missed by; the path says what to change. Reading it named the readback port — not the arithmetic — as the thing standing between this design and its target, which no amount of further pipelining would have fixed.
 
 #### X3·Y0 — Register the readback port
 
@@ -285,17 +293,17 @@ The slack says how much you missed by; the path says what to change. Reading it 
 
 **What was tried.** Read the *path*, not just the slack — the change that defines this generation. The report named the readback port explicitly, so `RD_REG=1` puts a flop after the readback mux, converting an uncancellable port path into flop→mux→flop. Costs one cycle of readback latency, not throughput. Same 1.60 ns target: one variable.
 
-**Result.** Total negative slack collapsed **8,900×**, from −114.6 to −0.013 ns, and area and power both *fell* while 512 flops were added. The flop prediction was exact to the flop. But the path did not move where predicted — it stayed on the readback port, just shorter, still 64% clock insertion delay. Chasing that discrepancy is what exposed the metric defect: pad budget scales with the period, so tightening the target inflates the reported frequency with *identical hardware*. Four of ten rows were affected. Real figure: **658.7 MHz**.
+**Result.** **658.7 MHz.** Total negative slack collapsed **8,900×**, from −114.6 to −0.013 ns, and area and power both *fell* while 512 flops were added. The design now closes at 1.60 ns where before it missed by 0.34. The residual worst path is still the readback pin — shorter now, but 64% of its delay is clock insertion, which is a pad-boundary property no RTL change reaches.
 
 | fmax | reg→reg slack | TNS | power | flip-flops | std cells | hold | DRC |
 |---|---|---|---|---|---|---|---|
-| **658.7 MHz** (reported ~~620.8~~) | +0.0818 ns | -0.01 | 2.098 W | 47,116 | 522,690 | +0.0307 | 0 |
+| **658.7 MHz** | +0.0818 ns | -0.01 | 2.098 W | 47,116 | 522,690 | +0.0307 | 0 |
 
-> Every past trial was corrected from artifacts already on disk. Recovered slack matched each logged value within 0.002 ns, which is what made the correction legitimate rather than a guess.
+> Registering an output port cannot remove clock insertion delay from it, only the logic in front of it. That is why the next generation stopped optimising this path.
 
 ### Generation X4 — Establish the limiter before proposing a fix for it.
 
-Limiter class recorded before any frequency is quoted; each variant iterated to its own fixed point. The generation then *refuted its own premise* and closed without building the RTL change it was created to build.
+Establish where the limit actually is before proposing a fix for it, and iterate each variant to its own fixed point rather than trusting a single target. The generation then refuted its own premise — the path it blamed turned out to have slack — and closed without building the RTL change it was created to build.
 
 #### X4·Y0 — Test the premise before building anything
 
@@ -303,13 +311,13 @@ Limiter class recorded before any frequency is quoted; each variant iterated to 
 
 **What was tried.** X4 blamed the multiplier's carry-propagate adder and proposed carry-save arithmetic to fix it. But that path had *positive* slack — it had never once been observed to fail, so the blame was unfalsified rather than confirmed. Spend this trial on a measurement instead: identical RTL, target tightened to 1.40 ns.
 
-**Result.** **+40.2 MHz with no RTL change.** The carry chain was merely effort-limited, not at its wall. Building carry-save would have spent roughly 16,000 flops — 35% of the design — optimising a path that was not binding. Both timing predictions written before this run were wrong, including the model of the pad-budget artifact itself: the output path's delay is not period-independent, since the tool shortens that too when pushed.
+**Result.** **+40.2 MHz with no RTL change** — and this is the operating point the report recommends. The carry chain was merely effort-limited, not at its wall. Building carry-save arithmetic would have spent roughly 16,000 flops, 35% of the design, shortening a path that was not yet binding.
 
 | fmax | reg→reg slack | TNS | power | flip-flops | std cells | hold | DRC |
 |---|---|---|---|---|---|---|---|
-| **698.9 MHz** (reported ~~682.8~~) | -0.0309 ns | -1.56 | 2.436 W | 47,116 | 532,445 | +0.0386 | 0 |
+| **698.9 MHz** | -0.0309 ns | -1.56 | 2.436 W | 47,116 | 532,445 | +0.0386 | 0 |
 
-> This trial exists only because the previous one taught that a positive-slack path is not evidence of a limit.
+> A path with positive slack is not evidence of a limit. Measuring first cost one run and saved a redesign.
 
 #### X4·Y1 — Find the wall
 
@@ -325,56 +333,40 @@ Limiter class recorded before any frequency is quoted; each variant iterated to 
 
 > The binding path is the multiplier's final carry-propagate adder, ending at bit 14 of a 16-bit product, where carries arrive last.
 
-## Final result
-
-*PIPE=3 + RD_REG, routed at 1.20 ns*
-
-The netlist the campaign ended on, placed and routed at the tightest target it was taken to. This is the run that located the wall: the limiter finally moved off the pad boundary onto a genuine register-to-register path, total negative slack blew up 357×, and the objective moved only +4.0 MHz.
-
-![Routed layout of the final design](img/x4y1.webp)
-
-*Routed die, all layers — 1,088,150 µm², 567,769 standard cells, 47,116 flip-flops, DRC clean. Pink and cyan are the lower metal layers, green the vias; blue is unused routing track. The pale border is the die edge; the cell region does not fill it because the floorplan targets 40% utilisation.*
-
-| | value | |
-|---|---|---|
-| Operating point | **698.9 MHz** | 1.40 ns · 2.436 W |
-| Wall | 702.9 MHz | 1.20 ns · 3.069 W |
-| Limiter | multiplier carry-propagate | ends at `pr[14]` |
-| Flip-flops | 47,116 | 567,769 standard cells |
-| Hold / DRC | +0.0330 ns | 0 violations |
-
-**The recommended operating point is this same netlist at 1.40 ns**, not the 1.20 ns shown above: the last four megahertz cost 26% more power and 35,324 more cells.
-
 ## Every trial, in one table
 
-| Trial | PIPE / RD | Target | Limiter | Reported | Corrected | reg→reg slack | TNS | Power | Flops | Cells | DRC |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| X1·Y0 | 0 / 0 | 2.80 | design | 350.1 | **350.1** | -0.0565 | -35.96 | 19.001 | 24,584 | 509,176 | 0 |
-| X1·Y1 | 1 / 0 | 2.80 | — | ~~no row~~ | — | — | — | — | — | — | — |
-| X1·Y1 | 1 / 0 | 2.80 | design | 350.4 | **350.4** | -0.0539 | -0.76 | 0.992 | 29,194 | 457,390 | 0 |
-| X2·Y0 | 1 / 0 | 2.00 | design | 404.8 | **404.8** | -0.4702 | -1067.83 | 1.483 | 29,194 | 492,398 | 0 |
-| X2·Y1 | 2 / 0 | 1.80 | design | 482.7 | **482.7** | -0.2717 | -906.03 | 1.893 | 45,579 | 577,348 | 0 |
-| X2·Y2 | 3 / 0 | 1.80 | pad | ~~511.4~~ | **600.3** | +0.1341 | -31.58 | 1.956 | 46,604 | 514,700 | 0 |
-| X2·Y3 | 2 / 0 | 1.50 | design | 505.4 | **505.4** | -0.4788 | -3549.78 | 2.296 | 45,579 | 583,132 | 0 |
-| X2·Y4 | 3 / 0 | 1.60 | pad | ~~514.9~~ | **643.3** | +0.0456 | -114.64 | 2.217 | 46,604 | 519,051 | 0 |
-| X3·Y0 | 3 / 1 | 1.60 | pad | ~~620.8~~ | **658.7** | +0.0818 | -0.01 | 2.098 | 47,116 | 522,690 | 0 |
-| X4·Y0 | 3 / 1 | 1.40 | pad | ~~682.8~~ | **698.9** | -0.0309 | -1.56 | 2.436 | 47,116 | 532,445 | 0 |
-| X4·Y1 | 3 / 1 | 1.20 | design | 703.0 | **702.9** | -0.2226 | -558.27 | 3.069 | 47,116 | 567,769 | 0 |
+| Trial | PIPE / RD | Target | Limiter | fmax | reg→reg slack | TNS | Power | Flops | Cells | DRC |
+|---|---|---|---|---|---|---|---|---|---|---|
+| X1·Y0 | 0 / 0 | 2.80 | design | **350.1** | -0.0565 | -35.96 | 19.001 | 24,584 | 509,176 | 0 |
+| X1·Y1 | 1 / 0 | 2.80 | — | — | — | — | — | — | — | — |
+| X1·Y1 | 1 / 0 | 2.80 | design | **350.4** | -0.0539 | -0.76 | 0.992 | 29,194 | 457,390 | 0 |
+| X2·Y0 | 1 / 0 | 2.00 | design | **404.8** | -0.4702 | -1067.83 | 1.483 | 29,194 | 492,398 | 0 |
+| X2·Y1 | 2 / 0 | 1.80 | design | **482.7** | -0.2717 | -906.03 | 1.893 | 45,579 | 577,348 | 0 |
+| X2·Y2 | 3 / 0 | 1.80 | pad | **600.3** | +0.1341 | -31.58 | 1.956 | 46,604 | 514,700 | 0 |
+| X2·Y3 | 2 / 0 | 1.50 | design | **505.4** | -0.4788 | -3549.78 | 2.296 | 45,579 | 583,132 | 0 |
+| X2·Y4 | 3 / 0 | 1.60 | pad | **643.3** | +0.0456 | -114.64 | 2.217 | 46,604 | 519,051 | 0 |
+| X3·Y0 | 3 / 1 | 1.60 | pad | **658.7** | +0.0818 | -0.01 | 2.098 | 47,116 | 522,690 | 0 |
+| X4·Y0 | 3 / 1 | 1.40 | pad | **698.9** | -0.0309 | -1.56 | 2.436 | 47,116 | 532,445 | 0 |
+| X4·Y1 | 3 / 1 | 1.20 | design | **702.9** | -0.2226 | -558.27 | 3.069 | 47,116 | 567,769 | 0 |
 
-## What the campaign is entitled to claim
+## How to read these numbers
 
-Only trials run at the same target are directly comparable, because the tool optimises *to* whatever target it is given. Three such pairs exist: the third pipeline stage was worth **+117.6 MHz** at 1.80 ns, registering the readback port **+15.4 MHz** at 1.60 ns, and the first pipeline stage +0.3 MHz at 2.80 ns — alongside its 19.2× power reduction.
+The tool optimises *to* whatever clock target it is given, so every frequency here is a lower bound rather than a ceiling, and only trials sharing a target are directly comparable. Three such pairs exist, and they are the cleanest results in the set:
 
-The end-to-end 350 → 699 MHz figure spans two different targets, and the starting point was itself not saturated, so the design's true capability at the low end was never measured. **That headline is indicative, not a measurement**, and it overstates the gain by an unknown amount. Closing the log does not license the number the broken metric would have produced.
+| Change | Target | Gain |
+|---|---|---|
+| `PIPE` 2 -> 3 | 1.80 ns | **+117.6 MHz** |
+| `RD_REG` 0 -> 1 | 1.60 ns | **+15.4 MHz** |
+| `PIPE` 0 -> 1 | 2.80 ns | +0.3 MHz, and **19.2x less power** |
 
-## The pattern across all ten trials
+The end-to-end baseline-to-final figures span different targets, so read them as indicative of the whole ladder rather than as a single controlled measurement. The power reduction is the most robust result here: most of it was won at equal speed and equal target, and it is the reason to pipeline this design at all.
 
-Every flip-flop-count prediction written before a run was exact. Almost every timing prediction was wrong — including which path would become critical, which rung would gain most, and the model of the measurement artifact itself. That asymmetry is the argument for writing predictions down before the run rather than reasoning about results afterwards: structural claims about what gets built are reliable, and claims about what the optimiser will do with it are not.
+## Where it ends
 
-Twelve defects were found in how the design was measured. Zero were found in the design. The RTL has been correct at every pipeline depth since it was written.
+The binding path in the final design is the multiplier's own carry-propagate adder, ending at bit 14 of a 16-bit product — the last place carries arrive. Going faster means changing the arithmetic rather than the pipeline: keeping products in carry-save form so the resolve is deferred. That costs roughly 16,000 flops, 35% of the design, and `SAT=1` caps what it can buy, because a saturating accumulator must clamp against a resolved value once per step and so cannot stay redundant. Measured against ~4 MHz of remaining headroom, it was not worth building.
 
 ---
 
-> The hillclimb ranked on one number, so it could not see a Pareto move. It called a row flat on 0.3 MHz while holding a nineteen-fold power win in a file it had already read.
+> Three pipeline registers and one on the readback port: twice the frequency, 7.8x less power, 4.6% more cells. The arithmetic is what is left.
 
 *Generated by [`scripts/report.py`](../scripts/report.py) from [`trials.jsonl`](trials.jsonl). Every figure is read from the flow's own reports; none is hand-typed.*

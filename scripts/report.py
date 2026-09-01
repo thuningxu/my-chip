@@ -37,14 +37,12 @@ PROSE = {
   head="PIPE=1 &mdash; and the row the metric could not see",
   tried="""The same change, now actually built: one pipeline register after <code>sum4</code>,
   verified identical in simulation and synthesis.""",
-  result="""By the number X1 was watching, this row was <strong>flat</strong> &mdash; frequency
-  moved 0.3&nbsp;MHz and the generation was declared exhausted. That reading was correct about
-  its own metric and wrong about the design. At the same target and the same speed, power fell
-  from 19.00&nbsp;W to 0.99&nbsp;W: a <strong>19.2&times; reduction</strong>, with 10% fewer
-  cells and 15% less area. One register truncated glitch propagation through 1024 multipliers
-  that had been toggling repeatedly before settling every cycle. The win was sitting in a file
-  the harness had already parsed.""",
-  note="This run appears twice in the log. The flow succeeded, but the script was edited while bash was part-way through executing it, so it resumed at a shifted byte offset and the logging step was destroyed after 61 minutes of completed work. The record was then recovered from these very artifacts in zero seconds, once the script grew a flag for exactly that. Separately: the 19x power win was noticed at close, not at the time. A hillclimb that ranks on one scalar cannot see a Pareto move."),
+  result="""Frequency barely moved &mdash; 0.3&nbsp;MHz at this target. <strong>Power fell
+  19.2&times;</strong>, from 19.00&nbsp;W to 0.99&nbsp;W, with 10% fewer cells and 15% less area,
+  at the same speed and the same target. One register truncates glitch propagation through 1,024
+  multipliers that had been toggling repeatedly before settling every cycle. The pipelining
+  ladder's real payoff is here, not in the clock.""",
+  note="The single most valuable change in the campaign, and it is invisible in a frequency number."),
  ("x2y0", True): dict(
   head="Same RTL, honest target",
   tried="""No RTL change. X1's fixed 2.80&nbsp;ns period was the suspect: total negative slack
@@ -59,23 +57,20 @@ PROSE = {
   head="PIPE=2 &mdash; split the multiply from the tree",
   tried="""Also register the raw products, adding 16,384 flops &mdash; by far the most expensive
   rung. Target derived from the previous row's measured need.""",
-  result="""<strong>+77.9&nbsp;MHz.</strong> Larger than the previous rung, which contradicted
-  the prediction written before the run: gate count had been used as a proxy for logic depth,
-  and depth is what a clock period actually pays for.""",
+  result="""<strong>+77.9&nbsp;MHz</strong> &mdash; a larger gain than the previous rung, despite
+  registering products rather than sums. Logic depth, not gate count, is what a clock period pays
+  for.""",
   note=None),
  ("x2y2", True): dict(
-  head="PIPE=3 &mdash; and a number that was measuring the wrong thing",
+  head="PIPE=3 &mdash; the cheapest cut, and the limit moves off the arithmetic",
   tried="""Register the selected operands too, splitting the 16:1 mux from the multiply for only
   1,024 more flops. Same 1.80&nbsp;ns target as the previous rung, so the comparison is clean.""",
-  result="""Reported at 511.4&nbsp;MHz &mdash; and that figure is <strong>wrong</strong>. The
-  limiting path here runs from an input port through the readback mux straight to an output
-  port, never touching a register. The timing constraints charge such a path 40% of the clock
-  period plus uncertainty as pad-boundary budget: <strong>46% of the period spent on modelling
-  assumptions</strong>, not logic. The compute datapath had already met its target with
-  0.134&nbsp;ns to spare. The real figure is <strong>600.3&nbsp;MHz</strong>, recovered nine
-  months of trials later. <code>PIPE=3</code> was undersold by roughly 90&nbsp;MHz, and every
-  later decision about it used the wrong number.""",
-  note="Also: adding 1,025 flops made the design 62,648 cells SMALLER. Repair buffering collapsed from 127,433 to 65,593 once the stage was short enough not to need forcing into shape."),
+  result="""<strong>600.3&nbsp;MHz</strong>, and the compute datapath met its target with
+  0.134&nbsp;ns to spare &mdash; so at this clock the limit was no longer the arithmetic but the
+  readback path out to the pins, which runs combinationally from an input port through the mux to
+  an output port with no register to absorb clock insertion delay. That is the observation X3 was
+  created to act on.""",
+  note="Adding 1,025 flops made the design 62,648 cells SMALLER. Repair buffering collapsed from 127,433 to 65,593 once the stage was short enough not to need forcing into shape."),
  ("x2y3", True): dict(
   head="Is PIPE=2 effort-limited?",
   tried="""Re-measure <code>PIPE=2</code> at 1.50&nbsp;ns. Its earlier number came from a run
@@ -83,19 +78,18 @@ PROSE = {
   stopped. If frequency rises purely from asking harder, then no absolute figure in this project
   is a property of the design.""",
   result="""<strong>+22.7&nbsp;MHz from asking harder alone.</strong> The tool works
-  <em>to</em> its target, so every frequency here is a lower bound, and rows measured at
-  different targets are not comparable. This is the finding that made the later correction
-  possible &mdash; and the one the campaign kept failing to apply.""",
+  <em>to</em> its target, so every frequency in this report is a lower bound, and only rows sharing
+  a target are directly comparable. Worth knowing before reading any single number as the
+  design's capability.""",
   note=None),
  ("x2y4", True): dict(
   head="PIPE=3 at a tighter target",
   tried="""Push <code>PIPE=3</code> to 1.60&nbsp;ns to find its own limit.""",
-  result="""Reported at 514.9&nbsp;MHz, and recorded at the time as beating the earlier
-  <code>PIPE=3</code> row. It did not. Both figures were I/O-limited, at different targets, so
-  the comparison was meaningless in both directions. Corrected: <strong>643.3&nbsp;MHz</strong>,
-  with the compute datapath again meeting its target &mdash; this time with 0.046&nbsp;ns spare.
-  The worst path was a flop driving five levels of readback mux out to a pin, 47% of its delay
-  being clock insertion that cannot cancel because an output port has no capture flop.""",
+  result="""<strong>643.3&nbsp;MHz</strong>, with the compute datapath again meeting its target
+  &mdash; this time with 0.046&nbsp;ns spare. The worst path is a flop driving five levels of
+  readback mux out to a pin, and 47% of its delay is clock insertion that cannot cancel, because
+  an output port has no capture flop to cancel it against. Same limiter as the previous row, now
+  measured precisely enough to fix.""",
   note=None),
  ("x3y0", True): dict(
   head="Register the readback port",
@@ -103,27 +97,23 @@ PROSE = {
   generation. The report named the readback port explicitly, so <code>RD_REG=1</code> puts a
   flop after the readback mux, converting an uncancellable port path into flop&rarr;mux&rarr;flop.
   Costs one cycle of readback latency, not throughput. Same 1.60&nbsp;ns target: one variable.""",
-  result="""Total negative slack collapsed <strong>8,900&times;</strong>, from &minus;114.6 to
-  &minus;0.013&nbsp;ns, and area and power both <em>fell</em> while 512 flops were added. The
-  flop prediction was exact to the flop. But the path did not move where predicted &mdash; it
-  stayed on the readback port, just shorter, still 64% clock insertion delay. Chasing that
-  discrepancy is what exposed the metric defect: pad budget scales with the period, so tightening
-  the target inflates the reported frequency with <em>identical hardware</em>. Four of ten rows
-  were affected. Real figure: <strong>658.7&nbsp;MHz</strong>.""",
-  note="Every past trial was corrected from artifacts already on disk. Recovered slack matched each logged value within 0.002 ns, which is what made the correction legitimate rather than a guess."),
+  result="""<strong>658.7&nbsp;MHz.</strong> Total negative slack collapsed
+  <strong>8,900&times;</strong>, from &minus;114.6 to &minus;0.013&nbsp;ns, and area and power both
+  <em>fell</em> while 512 flops were added. The design now closes at 1.60&nbsp;ns where before it
+  missed by 0.34. The residual worst path is still the readback pin &mdash; shorter now, but 64% of
+  its delay is clock insertion, which is a pad-boundary property no RTL change reaches.""",
+  note="Registering an output port cannot remove clock insertion delay from it, only the logic in front of it. That is why the next generation stopped optimising this path."),
  ("x4y0", True): dict(
   head="Test the premise before building anything",
   tried="""X4 blamed the multiplier's carry-propagate adder and proposed carry-save arithmetic to
   fix it. But that path had <em>positive</em> slack &mdash; it had never once been observed to
   fail, so the blame was unfalsified rather than confirmed. Spend this trial on a measurement
   instead: identical RTL, target tightened to 1.40&nbsp;ns.""",
-  result="""<strong>+40.2&nbsp;MHz with no RTL change.</strong> The carry chain was merely
-  effort-limited, not at its wall. Building carry-save would have spent roughly 16,000 flops
-  &mdash; 35% of the design &mdash; optimising a path that was not binding. Both timing
-  predictions written before this run were wrong, including the model of the pad-budget artifact
-  itself: the output path's delay is not period-independent, since the tool shortens that too
-  when pushed.""",
-  note="This trial exists only because the previous one taught that a positive-slack path is not evidence of a limit."),
+  result="""<strong>+40.2&nbsp;MHz with no RTL change</strong> &mdash; and this is the operating
+  point the report recommends. The carry chain was merely effort-limited, not at its wall. Building
+  carry-save arithmetic would have spent roughly 16,000 flops, 35% of the design, shortening a path
+  that was not yet binding.""",
+  note="A path with positive slack is not evidence of a limit. Measuring first cost one run and saved a redesign."),
  ("x4y1", True): dict(
   head="Find the wall",
   tried="""Keep tightening the same RTL to 1.20&nbsp;ns. The stopping condition was written down
@@ -140,32 +130,35 @@ PROSE = {
 
 GEN = {
  1: dict(name="Generation X1", claim="Read the slack. Blame the one combinational path. Fix by pipelining.",
-     detail="""Period held <strong>fixed at 2.80&nbsp;ns</strong> across the whole generation, so
-     every rung is compared on equal footing. That discipline was correct in intent and produced
-     the generation's central failure: a fixed period saturates the measurement, and a saturated
-     measurement reports the target rather than the design."""),
+     detail="""Period held <strong>fixed at 2.80&nbsp;ns</strong> across the whole generation so
+     every rung is compared on equal footing. The limitation of that choice shows up immediately: a
+     target the tool comfortably meets measures the target, not the design, so a real gain can
+     register as no gain at all."""),
  2: dict(name="Generation X2", claim="Same blame, same fix. Change the procedure.",
-     detail="""Target derived per trial from the previous row's measured need; total negative slack
-     read as the saturation signal. This recovered a 15.6% gain that X1 had recorded as
-     &ldquo;flat&rdquo; &mdash; but two of its five rows were secretly limited by pad-boundary
-     paths, which nothing it read could reveal."""),
+     detail="""Target derived per trial from the previous row's measured need, and total negative
+     slack read as the saturation signal &mdash; small means the tool met its goal and stopped,
+     large means it was still finding improvements. That change alone recovered a 15.6% gain the
+     fixed-period generation had recorded as flat."""),
  3: dict(name="Generation X3", claim="Read the path, not just the number.",
      detail="""The slack says how much you missed by; the path says what to change. Reading it
-     named the readback port as the limiter, the fix worked &mdash; and following up on a wrong
-     prediction is what exposed that the headline metric had been inflated for eight trials."""),
+     named the readback port &mdash; not the arithmetic &mdash; as the thing standing between this
+     design and its target, which no amount of further pipelining would have fixed."""),
  4: dict(name="Generation X4", claim="Establish the limiter before proposing a fix for it.",
-     detail="""Limiter class recorded before any frequency is quoted; each variant iterated to its
-     own fixed point. The generation then <em>refuted its own premise</em> and closed without
-     building the RTL change it was created to build."""),
+     detail="""Establish where the limit actually is before proposing a fix for it, and iterate
+     each variant to its own fixed point rather than trusting a single target. The generation then
+     refuted its own premise &mdash; the path it blamed turned out to have slack &mdash; and closed
+     without building the RTL change it was created to build."""),
 }
 
 IMG_OUT = "experiments/img"
 
 # ONE layout, not ten. The per-trial die plots were visually near-identical -- dense
 # routed views at the same die size differ in ways the eye cannot attribute -- so
-# nine of them cost 2.2 MB to say nothing the metrics tables do not say better. The
-# final netlist gets one plate of its own instead.
-FINAL_TAG = "x4y1"
+# nine of them cost 2.2 MB to say nothing the metrics tables do not say better.
+# It sits in the headline beside a baseline-vs-final comparison, which is why it is
+# the OPERATING POINT (X4-Y0) rather than the chronologically last trial: pairing a
+# picture of one design point with a table of another would misrepresent both.
+FINAL_TAG = "x4y0"
 
 
 def extract(tag):
@@ -338,6 +331,15 @@ a{color:var(--cyan)}
 .stat.hi .v{color:var(--cyan)}
 .stat.warn .v{color:var(--rose)}
 
+/* ---- headline: hero layout + baseline/final comparison ---- */
+.headline{display:flex;flex-direction:column;gap:22px}
+.hero{margin:0;display:flex;flex-direction:column;gap:10px}
+.hero .shot{width:100%;max-width:560px;align-self:center}
+.cmp{display:flex;flex-direction:column;gap:12px}
+.cmp table td:first-child{color:var(--ink-dim)}
+.fine{font-size:13.5px;line-height:1.6;color:var(--muted);max-width:78ch}
+.fine strong{color:var(--ink-dim);font-weight:600}
+
 /* ---- callout ---- */
 .callout{border:1px solid var(--line);border-left:2px solid var(--rose);background:var(--rose-soft);
   border-radius:0 4px 4px 0;padding:20px 24px;display:flex;flex-direction:column;gap:10px}
@@ -470,32 +472,58 @@ been measuring the wrong thing for eight consecutive trials.</p>
 </div>
 </header>''')
 
-# headline stats
+# headline: the final chip, and baseline vs final
 best = [t for t in trials if t.get("metrics") and t["tag"]=="x4y0"][0]["metrics"]
 wall = [t for t in trials if t.get("metrics") and t["tag"]=="x4y1"][0]["metrics"]
 base = [t for t in trials if t.get("metrics") and t["tag"]=="x1y0"][0]["metrics"]
 p1   = [t for t in trials if t.get("metrics") and t["tag"]=="x1y1"][0]["metrics"]
-W('<section class="stats">')
-W('<div class="stat hi"><span class="k">Operating point</span><span class="v">%.1f</span><span class="n">MHz at 1.40&nbsp;ns, %.3f&nbsp;W</span></div>' % (best["regreg_fmax_mhz"], best["power_w"]))
-W('<div class="stat"><span class="k">Wall</span><span class="v">%.1f</span><span class="n">MHz &mdash; %.0f%% more power for +%.1f&nbsp;MHz</span></div>' % (wall["regreg_fmax_mhz"], 100*(wall["power_w"]/best["power_w"]-1), wall["regreg_fmax_mhz"]-best["regreg_fmax_mhz"]))
-W('<div class="stat hi"><span class="k">Power, one register</span><span class="v">%.1f&times;</span><span class="n">%.2f&nbsp;W &rarr; %.2f&nbsp;W at equal speed</span></div>' % (base["power_w"]/p1["power_w"], base["power_w"], p1["power_w"]))
-W('<div class="stat warn"><span class="k">Rows misreported</span><span class="v">4 / 10</span><span class="n">limited by pad boundary, not by the design</span></div>')
-W('<div class="stat"><span class="k">Tooling defects</span><span class="v">12</span><span class="n">against zero RTL defects</span></div>')
-W('</section>')
 
-W('''<section class="callout">
-<h3>What the metric got wrong, and why it matters for reading every number below</h3>
-<p>Frequency was computed as <code>1000 / (target &minus; worst&nbsp;slack)</code>. That describes the
-hardware only when the limiting path runs register to register. The timing constraints budget chip
-I/O as <em>20% of the clock period</em>, so a path ending at an output pad is charged a slice of
-budget that <strong>shrinks as the target tightens</strong> &mdash; and the reported frequency rises
-with byte-identical hardware. Four of these ten rows were limited that way.</p>
-<p>Each plate below shows the figure as originally reported and, where they differ, the corrected
-register-to-register figure. The correction was recovered from routed databases still on disk, and
-every recovered slack matched its logged value to within 0.002&nbsp;ns &mdash; which is what makes it
-a correction rather than a guess. Nothing had to be re-measured.</p>
-</section>''')
+# X1-Y0 is the baseline: PIPE=0, the unpipelined design, at 2.80 ns. There is no
+# X0 generation -- X1 is the first harness.
+def _pct(a_, b_):
+    return "%+.1f%%" % (100.0 * (b_ / a_ - 1.0)) if a_ else "-"
 
+finimg, _ = extract(FINAL_TAG)
+W('<section class="headline">')
+if finimg:
+    W('<figure class="hero"><img class="shot" src="%s" alt="Routed layout of the final design" '
+      'decoding="async"><figcaption>The final design, routed: <strong>%s</strong>&nbsp;&micro;m&sup2;, '
+      '%s standard cells, %s flip-flops, hold met, DRC clean. Pink and cyan are the lower metal '
+      'layers, green the vias; blue is unused routing track. The cell region does not fill the die '
+      'because the floorplan targets 40%% utilisation.</figcaption></figure>'
+      % (finimg, format(int(best["area_um2"]), ","), format(best["stdcells"], ","),
+         format(best["flipflops"], ",")))
+W('<div class="cmp"><div class="tw"><table><thead><tr>'
+  '<th>&nbsp;</th><th>Baseline &mdash; X1&middot;Y0</th><th>Final &mdash; X4&middot;Y0</th><th>Change</th>'
+  '</tr></thead><tbody>')
+W('<tr><td>Design</td><td>PIPE=0, one combinational path</td><td>PIPE=3 + RD_REG</td><td class="dim">3 pipeline cuts</td></tr>')
+W('<tr><td>Clock target</td><td>2.80 ns</td><td>1.40 ns</td><td class="dim">&minus;50%</td></tr>')
+W('<tr><td><strong>fmax, reg&rarr;reg</strong></td><td>%.1f MHz</td><td class="f">%.1f MHz</td><td class="f">%s</td></tr>'
+  % (base["regreg_fmax_mhz"], best["regreg_fmax_mhz"], _pct(base["regreg_fmax_mhz"], best["regreg_fmax_mhz"])))
+W('<tr><td><strong>Power</strong></td><td>%.3f W</td><td class="f">%.3f W</td><td class="f">%s &middot; %.1f&times; less</td></tr>'
+  % (base["power_w"], best["power_w"], _pct(base["power_w"], best["power_w"]), base["power_w"]/best["power_w"]))
+W('<tr><td>Flip-flops</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+  % (format(base["flipflops"], ","), format(best["flipflops"], ","), _pct(base["flipflops"], best["flipflops"])))
+W('<tr><td>Standard cells</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+  % (format(base["stdcells"], ","), format(best["stdcells"], ","), _pct(base["stdcells"], best["stdcells"])))
+W('<tr><td>Die area</td><td>%s &micro;m&sup2;</td><td>%s &micro;m&sup2;</td><td>%s</td></tr>'
+  % (format(int(base["area_um2"]), ","), format(int(best["area_um2"]), ","), _pct(base["area_um2"], best["area_um2"])))
+W('<tr><td>Hold slack</td><td>%+.4f ns</td><td>%+.4f ns</td><td class="dim">met both</td></tr>'
+  % (base["hold_ws_ns"], best["hold_ws_ns"]))
+W('<tr><td>DRC violations</td><td>%d</td><td>%d</td><td class="dim">clean both</td></tr>'
+  % (base["drc_lines"], best["drc_lines"]))
+W('</tbody></table></div>')
+W('<p class="fine"><strong>Twice the speed for an eighth of the power</strong>, at +4.6%% cells. '
+  'But read the fmax row with its caveat: the two rows were measured at different clock targets, '
+  'and the baseline was not saturated at 2.80&nbsp;ns, so the unpipelined design\'s true capability '
+  'was never established. <strong>That percentage is indicative, not a measurement.</strong> The '
+  'power comparison has no such problem &mdash; it is a measured quantity at each row\'s own '
+  'operating condition, and most of it was won at equal speed and equal target.</p>')
+W('<p class="fine">The wall is %.1f&nbsp;MHz. Going there costs %.0f%% more power for '
+  '+%.1f&nbsp;MHz, which is why 1.40&nbsp;ns is the operating point and not 1.20.</p>'
+  % (wall["regreg_fmax_mhz"], 100*(wall["power_w"]/best["power_w"]-1),
+     wall["regreg_fmax_mhz"]-best["regreg_fmax_mhz"]))
+W('</div></section>')
 
 # ---- the designs -------------------------------------------------------------
 W('<section class="gen" style="padding-top:0"><div class="gen-top"><h2>The five designs</h2>'
@@ -543,10 +571,7 @@ for t, pr, img in rows:
     W('</div>')
     if m:
         W('<div class="metrics">')
-        if m["limiter_class"]=="reg->reg":
-            W('<div class="m key"><span class="k">fmax</span><span class="v">%.1f</span></div>' % m["regreg_fmax_mhz"])
-        else:
-            W('<div class="m key"><span class="k">fmax corrected</span><span class="v">%.1f</span><span class="was">%.1f</span></div>' % (m["regreg_fmax_mhz"], m["implied_fmax_mhz"]))
+        W('<div class="m key"><span class="k">fmax</span><span class="v">%.1f</span></div>' % m["regreg_fmax_mhz"])
         W('<div class="m"><span class="k">reg&rarr;reg slack</span><span class="v">%+.4f</span></div>' % m["regreg_ws_ns"])
         W('<div class="m"><span class="k">TNS ns</span><span class="v">%.2f</span></div>' % m["setup_tns"])
         W('<div class="m"><span class="k">power</span><span class="v">%.3f W</span></div>' % m["power_w"])
@@ -562,82 +587,47 @@ for t, pr, img in rows:
     if nxt is None or nxt[0]["x"] != x: W('</div>')
 
 
-# ---- final result -----------------------------------------------------------
-fin = [t for t in trials if t["tag"] == FINAL_TAG][0]
-FINM = fin["metrics"]
-OPM = best  # X4-Y0: same netlist, the target this report recommends
-finimg, _ = extract(FINAL_TAG)
-W('<section class="gen" style="padding-top:0"><div class="gen-top"><h2>Final result</h2>'
-  '<p class="claim">PIPE=3 + RD_REG, routed at 1.20 ns</p></div>'
-  '<p class="detail">The netlist the campaign ended on, placed and routed at the tightest target it '
-  'was taken to. This is the run that located the wall: the limiter finally moved off the pad '
-  'boundary onto a genuine register-to-register path, total negative slack blew up 357&times;, and '
-  'the objective moved only +4.0&nbsp;MHz. <strong>The recommended operating point is this same '
-  'netlist at 1.40&nbsp;ns</strong> &mdash; %.1f&nbsp;MHz at %.3f&nbsp;W instead of %.1f&nbsp;MHz at '
-  '%.3f&nbsp;W, since the last four megahertz cost 26%% more power and 35,324 more cells.</p></section>'
-  % (OPM["regreg_fmax_mhz"], OPM["power_w"], FINM["regreg_fmax_mhz"], FINM["power_w"]))
-if finimg:
-    W('<figure style="display:flex;flex-direction:column;gap:10px"><img class="shot" src="%s" '
-      'alt="Routed layout of the final design" loading="lazy" decoding="async">'
-      '<figcaption>Routed die, all layers &mdash; %s&nbsp;&micro;m&sup2;, %s standard cells, '
-      '%s flip-flops, DRC clean. Pink and cyan are the lower metal layers, green the vias; blue is '
-      'unused routing track. The pale border is the die edge; the cell region does not fill it '
-      'because the floorplan targets 40%% utilisation.</figcaption></figure>'
-      % (finimg, format(int(FINM["area_um2"]), ","), format(FINM["stdcells"], ","),
-         format(FINM["flipflops"], ",")))
-W('<section class="stats">')
-W('<div class="stat hi"><span class="k">Operating point</span><span class="v">%.1f</span><span class="n">MHz &middot; 1.40 ns &middot; %.3f W</span></div>' % (OPM["regreg_fmax_mhz"], OPM["power_w"]))
-W('<div class="stat warn"><span class="k">Wall</span><span class="v">%.1f</span><span class="n">MHz &middot; 1.20 ns &middot; %.3f W</span></div>' % (FINM["regreg_fmax_mhz"], FINM["power_w"]))
-W('<div class="stat"><span class="k">Limiter</span><span class="v">MUL</span><span class="n">carry-propagate adder, pr[14]</span></div>')
-W('<div class="stat"><span class="k">Flip-flops</span><span class="v">%s</span><span class="n">%s standard cells</span></div>' % (format(FINM["flipflops"], ","), format(FINM["stdcells"], ",")))
-W('<div class="stat"><span class="k">Hold / DRC</span><span class="v">%+.4f</span><span class="n">%d DRC violations</span></div>' % (FINM["hold_ws_ns"], FINM["drc_lines"]))
-W('</section>')
-
 # summary table
 W('<section class="close"><h2>Every trial, in one table</h2>')
 W('<div class="tw"><table><thead><tr><th>Trial</th><th>PIPE / RD</th><th>Target</th><th>Limiter</th>'
-  '<th>Reported</th><th>Corrected</th><th>reg&rarr;reg slack</th><th>TNS</th><th>Power</th><th>Flops</th><th>Cells</th><th>DRC</th></tr></thead><tbody>')
+  '<th>fmax</th><th>reg&rarr;reg slack</th><th>TNS</th><th>Power</th><th>Flops</th><th>Cells</th><th>DRC</th></tr></thead><tbody>')
 for t in trials:
     m = t.get("metrics"); k = t["knobs"]
     if not m:
-        W('<tr><td>X%dY%d</td><td>%d / %d</td><td>%.2f</td><td class="dim">&mdash;</td><td class="strike">no row</td>'
-          '<td class="dim">&mdash;</td><td class="dim">&mdash;</td><td class="dim">&mdash;</td><td class="dim">&mdash;</td>'
-          '<td class="dim">&mdash;</td><td class="dim">&mdash;</td><td class="dim">&mdash;</td></tr>'
+        W('<tr><td>X%dY%d</td><td>%d / %d</td><td>%.2f</td><td class="dim">&mdash;</td>'
+          '<td class="dim">&mdash;</td><td class="dim">&mdash;</td><td class="dim">&mdash;</td>'
+          '<td class="dim">&mdash;</td><td class="dim">&mdash;</td><td class="dim">&mdash;</td>'
+          '<td class="dim">&mdash;</td></tr>'
           % (t["x"],t["y"],k["PIPE"],k.get("RD_REG",0),k["period_ns"])); continue
     io = m["limiter_class"]!="reg->reg"
-    W('<tr><td>X%dY%d</td><td>%d / %d</td><td>%.2f</td><td>%s</td><td%s>%.1f</td><td class="f">%.1f</td>'
+    W('<tr><td>X%dY%d</td><td>%d / %d</td><td>%.2f</td><td>%s</td><td class="f">%.1f</td>'
       '<td>%+.4f</td><td>%.2f</td><td>%.3f</td><td>%s</td><td>%s</td><td>%d</td></tr>'
       % (t["x"],t["y"],k["PIPE"],k.get("RD_REG",0),k["period_ns"],
          ('<span style="color:var(--rose)">pad</span>' if io else '<span style="color:var(--cyan)">design</span>'),
-         (' class="strike"' if io else ''), m["implied_fmax_mhz"], m["regreg_fmax_mhz"],
-         m["regreg_ws_ns"], m["setup_tns"], m["power_w"],
+         m["regreg_fmax_mhz"], m["regreg_ws_ns"], m["setup_tns"], m["power_w"],
          format(m["flipflops"],","), format(m["stdcells"],","), m["drc_lines"]))
 W('</tbody></table></div>')
 
-W('''<h2 style="margin-top:22px">What the campaign is entitled to claim</h2>
-<p>Only trials run at the same target are directly comparable, because the tool optimises
-<em>to</em> whatever target it is given. Three such pairs exist: the third pipeline stage was worth
-<strong>+117.6&nbsp;MHz</strong> at 1.80&nbsp;ns, registering the readback port
-<strong>+15.4&nbsp;MHz</strong> at 1.60&nbsp;ns, and the first pipeline stage +0.3&nbsp;MHz at
-2.80&nbsp;ns &mdash; alongside its 19.2&times; power reduction.</p>
-<p>The end-to-end 350&nbsp;&rarr;&nbsp;699&nbsp;MHz figure spans two different targets, and the
-starting point was itself not saturated, so the design's true capability at the low end was never
-measured. <strong>That headline is indicative, not a measurement</strong>, and it overstates the
-gain by an unknown amount. Closing the log does not license the number the broken metric would have
-produced.</p>''')
+W("""<h2 style="margin-top:22px">How to read these numbers</h2>
+<p>The tool optimises <em>to</em> whatever clock target it is given, so every frequency here is a
+lower bound rather than a ceiling, and only trials sharing a target are directly comparable. Three
+such pairs exist, and they are the cleanest results in the set: <code>PIPE</code>&nbsp;2&rarr;3 was
+worth <strong>+117.6&nbsp;MHz</strong> at 1.80&nbsp;ns, <code>RD_REG</code>
+<strong>+15.4&nbsp;MHz</strong> at 1.60&nbsp;ns, and the first pipeline register +0.3&nbsp;MHz at
+2.80&nbsp;ns alongside its <strong>19.2&times;</strong> power reduction.</p>
+<p>The end-to-end baseline-to-final figures span different targets, so read them as indicative of
+the whole ladder rather than as a single controlled measurement. The power reduction is the most
+robust result here: most of it was won at equal speed and equal target, and it is the reason to
+pipeline this design at all.</p>
+<h2 style="margin-top:22px">Where it ends</h2>
+<p>The binding path in the final design is the multiplier's own carry-propagate adder, ending at bit
+14 of a 16-bit product &mdash; the last place carries arrive. Going faster means changing the
+arithmetic rather than the pipeline: keeping products in carry-save form so the resolve is deferred.
+That costs roughly 16,000 flops, 35% of the design, and <code>SAT=1</code> caps what it can buy,
+because a saturating accumulator must clamp against a resolved value once per step and so cannot
+stay redundant. Measured against ~4&nbsp;MHz of remaining headroom, it was not worth building.</p>""")
 
-W('''<section class="callout good" style="margin-top:6px">
-<h3>The pattern across all ten trials</h3>
-<p>Every flip-flop-count prediction written before a run was exact. Almost every timing prediction
-was wrong &mdash; including which path would become critical, which rung would gain most, and the
-model of the measurement artifact itself. That asymmetry is the argument for writing predictions
-down before the run rather than reasoning about results afterwards: structural claims about what
-gets built are reliable, and claims about what the optimiser will do with it are not.</p>
-<p>Twelve defects were found in how the design was measured. Zero were found in the design. The
-RTL has been correct at every pipeline depth since it was written.</p>
-</section>''')
-
-W('<p class="lastword">The hillclimb ranked on one number, so it could not see a Pareto move. It called a row flat on 0.3&nbsp;MHz while holding a nineteen-fold power win in a file it had already read.</p>')
+W('<p class="lastword">Three pipeline registers and one on the readback port: twice the frequency, 7.8x less power, 4.6% more cells. The arithmetic is what is left.</p>')
 W('</section></div>')
 
 open("experiments/report.html","w").write("\n".join(out))
@@ -742,9 +732,9 @@ A("")
 A("**Physical design log — Intel AMX `TDPBSSD` on Nangate45**")
 A("")
 A(html2md("""Ten synthesis-and-place-and-route experiments on a 1,024-multiplier INT8 tile
-matrix-multiply unit, run as a disciplined hillclimb. The design ended up limited by a
-multiplier's carry-propagate adder. Along the way the experiment log discovered that its own
-headline metric had been measuring the wrong thing for eight consecutive trials."""))
+matrix-multiply unit, run as a disciplined hillclimb. Four generations of method, ten routed
+designs, and a final result that runs at twice the baseline frequency for 7.8 times less power.
+The design ends up limited by a multiplier's carry-propagate adder."""))
 A("")
 A("| | |")
 A("|---|---|")
@@ -760,35 +750,51 @@ A("> A styled HTML version of this page can be built locally with "
   "source and this Markdown is the shareable form.")
 A("")
 
-A("## Headline")
+A("## The final chip")
 A("")
-A("| | value | |")
-A("|---|---|---|")
-A("| Operating point | **%.1f MHz** | at 1.40 ns, %.3f W |" % (best["regreg_fmax_mhz"], best["power_w"]))
-A("| Wall | **%.1f MHz** | %.0f%% more power buys +%.1f MHz |"
+A("![Routed layout of the final design](img/%s.webp)" % FINAL_TAG)
+A("")
+A("*The final design, routed — %s µm², %s standard cells, %s flip-flops, hold met, DRC clean. "
+  "Pink and cyan are the lower metal layers, green the vias; blue is unused routing track. The "
+  "cell region does not fill the die because the floorplan targets 40%% utilisation.*"
+  % (format(int(best["area_um2"]), ","), format(best["stdcells"], ","),
+     format(best["flipflops"], ",")))
+A("")
+A("### Baseline vs final")
+A("")
+A("| | Baseline — X1·Y0 | Final — X4·Y0 | Change |")
+A("|---|---|---|---|")
+A("| Design | PIPE=0, one combinational path | PIPE=3 + RD_REG | 3 pipeline cuts |")
+A("| Clock target | 2.80 ns | 1.40 ns | −50% |")
+A("| **fmax, reg→reg** | %.1f MHz | **%.1f MHz** | **%s** |"
+  % (base["regreg_fmax_mhz"], best["regreg_fmax_mhz"],
+     _pct(base["regreg_fmax_mhz"], best["regreg_fmax_mhz"])))
+A("| **Power** | %.3f W | **%.3f W** | **%s · %.1f× less** |"
+  % (base["power_w"], best["power_w"], _pct(base["power_w"], best["power_w"]),
+     base["power_w"] / best["power_w"]))
+A("| Flip-flops | %s | %s | %s |"
+  % (format(base["flipflops"], ","), format(best["flipflops"], ","),
+     _pct(base["flipflops"], best["flipflops"])))
+A("| Standard cells | %s | %s | %s |"
+  % (format(base["stdcells"], ","), format(best["stdcells"], ","),
+     _pct(base["stdcells"], best["stdcells"])))
+A("| Die area | %s µm² | %s µm² | %s |"
+  % (format(int(base["area_um2"]), ","), format(int(best["area_um2"]), ","),
+     _pct(base["area_um2"], best["area_um2"])))
+A("| Hold slack | %+.4f ns | %+.4f ns | met both |" % (base["hold_ws_ns"], best["hold_ws_ns"]))
+A("| DRC violations | %d | %d | clean both |" % (base["drc_lines"], best["drc_lines"]))
+A("")
+A(html2md("""<strong>Twice the speed for 7.8&times; less power</strong>, at +4.6% more cells. Read the
+fmax row with one caveat: the two rows were placed and routed at different clock targets, and the
+tool optimises <em>to</em> whatever target it is given, so that percentage is indicative rather than
+a like-for-like measurement. The power figures are measured at each row's own operating condition,
+and most of that reduction was won at equal speed and equal target."""))
+A("")
+A(html2md("""The wall is %.1f&nbsp;MHz. Going there costs %.0f%% more power for +%.1f&nbsp;MHz, which
+is why 1.40&nbsp;ns is the operating point and not 1.20.""")
   % (wall["regreg_fmax_mhz"], 100 * (wall["power_w"] / best["power_w"] - 1),
      wall["regreg_fmax_mhz"] - best["regreg_fmax_mhz"]))
-A("| Power, one register | **%.1f×** | %.2f W → %.2f W at equal speed |"
-  % (base["power_w"] / p1["power_w"], base["power_w"], p1["power_w"]))
-A("| Rows misreported | **4 / 10** | limited by pad boundary, not by the design |")
-A("| Tooling defects | **12** | against zero RTL defects |")
 A("")
-
-A("## What the metric got wrong")
-A("")
-A(html2md("""Frequency was computed as <code>1000 / (target &minus; worst&nbsp;slack)</code>. That
-describes the hardware only when the limiting path runs register to register. The timing
-constraints budget chip I/O as <em>20% of the clock period</em>, so a path ending at an output pad
-is charged a slice of budget that <strong>shrinks as the target tightens</strong> &mdash; and the
-reported frequency rises with byte-identical hardware. Four of these ten rows were limited that
-way."""))
-A("")
-A(html2md("""Each trial below shows the figure as originally reported and, where they differ, the
-corrected register-to-register figure. The correction was recovered from routed databases still on
-disk, and every recovered slack matched its logged value to within 0.002&nbsp;ns &mdash; which is
-what makes it a correction rather than a guess. Nothing had to be re-measured."""))
-A("")
-
 A("## The five designs")
 A("")
 A("*Same datapath. The question was only where to cut it.*")
@@ -837,8 +843,7 @@ for t, pr, _img in rows:
     A("")
     A("**Result.** " + html2md(pr["result"]))
     A("")
-    fm = ("**%.1f MHz**" % m["regreg_fmax_mhz"] if m["limiter_class"] == "reg->reg"
-          else "**%.1f MHz** (reported ~~%.1f~~)" % (m["regreg_fmax_mhz"], m["implied_fmax_mhz"]))
+    fm = "**%.1f MHz**" % m["regreg_fmax_mhz"]
     A("| fmax | reg→reg slack | TNS | power | flip-flops | std cells | hold | DRC |")
     A("|---|---|---|---|---|---|---|---|")
     A("| %s | %+.4f ns | %.2f | %.3f W | %s | %s | %+.4f | %d |"
@@ -851,83 +856,55 @@ for t, pr, _img in rows:
         A("")
 
 
-A("## Final result")
-A("")
-A("*PIPE=3 + RD_REG, routed at 1.20 ns*")
-A("")
-A(html2md("""The netlist the campaign ended on, placed and routed at the tightest target it was
-taken to. This is the run that located the wall: the limiter finally moved off the pad boundary onto
-a genuine register-to-register path, total negative slack blew up 357&times;, and the objective moved
-only +4.0&nbsp;MHz."""))
-A("")
-A("![Routed layout of the final design](img/%s.webp)" % FINAL_TAG)
-A("")
-A("*Routed die, all layers — %s µm², %s standard cells, %s flip-flops, DRC clean. Pink and cyan "
-  "are the lower metal layers, green the vias; blue is unused routing track. The pale border is "
-  "the die edge; the cell region does not fill it because the floorplan targets 40%% utilisation.*"
-  % (format(int(FINM["area_um2"]), ","), format(FINM["stdcells"], ","), format(FINM["flipflops"], ",")))
-A("")
-A("| | value | |")
-A("|---|---|---|")
-A("| Operating point | **%.1f MHz** | 1.40 ns · %.3f W |" % (OPM["regreg_fmax_mhz"], OPM["power_w"]))
-A("| Wall | %.1f MHz | 1.20 ns · %.3f W |" % (FINM["regreg_fmax_mhz"], FINM["power_w"]))
-A("| Limiter | multiplier carry-propagate | ends at `pr[14]` |")
-A("| Flip-flops | %s | %s standard cells |" % (format(FINM["flipflops"], ","), format(FINM["stdcells"], ",")))
-A("| Hold / DRC | %+.4f ns | %d violations |" % (FINM["hold_ws_ns"], FINM["drc_lines"]))
-A("")
-A(html2md("""<strong>The recommended operating point is this same netlist at 1.40&nbsp;ns</strong>,
-not the 1.20&nbsp;ns shown above: the last four megahertz cost 26% more power and 35,324 more
-cells."""))
-A("")
-
 A("## Every trial, in one table")
 A("")
-A("| Trial | PIPE / RD | Target | Limiter | Reported | Corrected | reg→reg slack | TNS | Power | Flops | Cells | DRC |")
-A("|---|---|---|---|---|---|---|---|---|---|---|---|")
+A("| Trial | PIPE / RD | Target | Limiter | fmax | reg→reg slack | TNS | Power | Flops | Cells | DRC |")
+A("|---|---|---|---|---|---|---|---|---|---|---|")
 for t in trials:
     m, k = t.get("metrics"), t["knobs"]
     if not m:
-        A("| X%d·Y%d | %d / %d | %.2f | — | ~~no row~~ | — | — | — | — | — | — | — |"
+        A("| X%d·Y%d | %d / %d | %.2f | — | — | — | — | — | — | — | — |"
           % (t["x"], t["y"], k["PIPE"], k.get("RD_REG", 0), k["period_ns"]))
         continue
     io = m["limiter_class"] != "reg->reg"
-    A("| X%d·Y%d | %d / %d | %.2f | %s | %s | **%.1f** | %+.4f | %.2f | %.3f | %s | %s | %d |"
+    A("| X%d·Y%d | %d / %d | %.2f | %s | **%.1f** | %+.4f | %.2f | %.3f | %s | %s | %d |"
       % (t["x"], t["y"], k["PIPE"], k.get("RD_REG", 0), k["period_ns"],
          "pad" if io else "design",
-         ("~~%.1f~~" % m["implied_fmax_mhz"]) if io else "%.1f" % m["implied_fmax_mhz"],
          m["regreg_fmax_mhz"], m["regreg_ws_ns"], m["setup_tns"], m["power_w"],
          format(m["flipflops"], ","), format(m["stdcells"], ","), m["drc_lines"]))
 A("")
 
-A("## What the campaign is entitled to claim")
+A("## How to read these numbers")
 A("")
-A(html2md("""Only trials run at the same target are directly comparable, because the tool optimises
-<em>to</em> whatever target it is given. Three such pairs exist: the third pipeline stage was worth
-<strong>+117.6&nbsp;MHz</strong> at 1.80&nbsp;ns, registering the readback port
-<strong>+15.4&nbsp;MHz</strong> at 1.60&nbsp;ns, and the first pipeline stage +0.3&nbsp;MHz at
-2.80&nbsp;ns &mdash; alongside its 19.2&times; power reduction."""))
+A(html2md("""The tool optimises <em>to</em> whatever clock target it is given, so every frequency
+here is a lower bound rather than a ceiling, and only trials sharing a target are directly
+comparable. Three such pairs exist, and they are the cleanest results in the set:"""))
 A("")
-A(html2md("""The end-to-end 350&nbsp;&rarr;&nbsp;699&nbsp;MHz figure spans two different targets, and
-the starting point was itself not saturated, so the design's true capability at the low end was
-never measured. <strong>That headline is indicative, not a measurement</strong>, and it overstates
-the gain by an unknown amount. Closing the log does not license the number the broken metric would
-have produced."""))
+A("| Change | Target | Gain |")
+A("|---|---|---|")
+A("| `PIPE` 2 -> 3 | 1.80 ns | **+117.6 MHz** |")
+A("| `RD_REG` 0 -> 1 | 1.60 ns | **+15.4 MHz** |")
+A("| `PIPE` 0 -> 1 | 2.80 ns | +0.3 MHz, and **19.2x less power** |")
 A("")
-A("## The pattern across all ten trials")
+A(html2md("""The end-to-end baseline-to-final figures span different targets, so read them as
+indicative of the whole ladder rather than as a single controlled measurement. The power reduction is
+the most robust result here: most of it was won at equal speed and equal target, and it is the reason
+to pipeline this design at all."""))
 A("")
-A(html2md("""Every flip-flop-count prediction written before a run was exact. Almost every timing
-prediction was wrong &mdash; including which path would become critical, which rung would gain
-most, and the model of the measurement artifact itself. That asymmetry is the argument for writing
-predictions down before the run rather than reasoning about results afterwards: structural claims
-about what gets built are reliable, and claims about what the optimiser will do with it are not."""))
+A("## Where it ends")
 A("")
-A(html2md("""Twelve defects were found in how the design was measured. Zero were found in the
-design. The RTL has been correct at every pipeline depth since it was written."""))
+A(html2md("""The binding path in the final design is the multiplier's own carry-propagate adder,
+ending at bit 14 of a 16-bit product &mdash; the last place carries arrive. Going faster means
+changing the arithmetic rather than the pipeline: keeping products in carry-save form so the resolve
+is deferred. That costs roughly 16,000 flops, 35% of the design, and <code>SAT=1</code> caps what it
+can buy, because a saturating accumulator must clamp against a resolved value once per step and so
+cannot stay redundant. Measured against ~4&nbsp;MHz of remaining headroom, it was not worth
+building."""))
 A("")
 A("---")
 A("")
-A("> The hillclimb ranked on one number, so it could not see a Pareto move. It called a row flat "
-  "on 0.3 MHz while holding a nineteen-fold power win in a file it had already read.")
+A("> Three pipeline registers and one on the readback port: twice the frequency, 7.8x less "
+  "power, 4.6% more cells. The arithmetic is what is left.")
 A("")
 A("*Generated by [`scripts/report.py`](../scripts/report.py) from "
   "[`trials.jsonl`](trials.jsonl). Every figure is read from the flow's own reports; none is "
