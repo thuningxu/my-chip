@@ -7,18 +7,20 @@ The deliverable is **not** the chip. It is `EXPERIMENTS.md` — a table of
 measured, reproducible rows where every row is one idea, and every number says
 what kind of number it is.
 
-Three designs live here, selected with `DESIGN=`:
+Four designs live here, selected with `DESIGN=`:
 
 | design | what | scale |
 |---|---|---|
 | **`mac_array`** (default) | INT4 outer-product MAC array. The v0 baseline, deliberately the simplest *correct* design. `D = init + A@B` with three init modes and two readout modes | 16 mult at N=4, 256 at N=16 |
 | **`amx_tdpbssd`** | **Intel AMX `TDPBSSD`** — INT8 tile dot-product, `C += A@B` on `(16,64)@(64,16)`, 16,384 MACs, with optional INT32 saturation | 1024 mult, 16 cycles |
 | **`tpu_mmu`** | **TPU v1-style weight-stationary systolic array** — `C += A@W`, N×N, INT8. Built at `TN=32` because 32×32 = 1024 multipliers is *exactly* `amx_tdpbssd`'s count, which makes systolic-vs-broadcast a controlled comparison rather than one across scales | 1024 mult at TN=32, 3N cycles |
+| **`amx_fp8`** | **Intel AMX-FP8** (Diamond Rapids) — all four mix-and-match variants (`TDPBF8PS`/`TDPBHF8PS`/`TDPHBF8PS`/`TDPHF8PS`) in one netlist, selected at *runtime* by `op[1:0]`. `C += A@B` on `(16,64)@(64,16)`, fp8 in, **IEEE FP32 accumulate**. Same operand delivery as `amx_tdpbssd`, so the delta is purely the arithmetic | 1024 mult + **1024 FP32 adders**, 20 cycles |
 
 ```bash
-make sim-matrix                          # all designs, all parameter states (28)
+make sim-matrix                          # all designs, all parameter states (32)
 make measure DESIGN=amx_tdpbssd SAT=1    # synth + P&R one of them
 make measure DESIGN=tpu_mmu TN=32 RDREG=1
+make measure DESIGN=amx_fp8 RDREG=1
 ```
 
 ## Prerequisites
@@ -82,10 +84,16 @@ my-chip/
 ├── rtl/mac_array.v      # v0 baseline: parameterised N x N INT4 outer-product MAC
 ├── rtl/amx_tdpbssd.v    # Intel AMX TDPBSSD, 1024 INT8 MACs, broadcast array
 ├── rtl/tpu_mmu.v        # TPU v1-style weight-stationary systolic array
+├── rtl/amx_fp8.v        # Intel AMX-FP8, all four variants in one netlist
+├── rtl/fp8_mul.v        # fp8_dec + fp8_mul -- E5M2/E4M3 decode, exact 4x4 product
+├── rtl/fp32_add.v       # IEEE FP32 adder, RNE + DAZ/FTZ. 1024 instances, THE floor
 ├── tb/tb_mac_array.v    # self-checking regression, 22 cases, PASS at N=4/8/16
+├── tb/tb_fp32_add.v     # 121k checks on the adder -- ties, cancellation, DAZ/FTZ
+├── tb/tb_fp8_mul.v      # EXHAUSTIVE: all 4 format pairs x 256 x 256
 ├── tb/golden.py         # independent Python reference + accumulator-width checker
 ├── tb/amx_golden.py     # 4th model for TDPBSSD: VNNI pack/unpack, both SAT modes
 ├── tb/tpu_golden.py     # cycle-accurate systolic model + the SCHEDULE PROOF
+├── tb/fp8_golden.py     # two independent FP32 adders + an exact rational yardstick
 ├── flow/nangate45/
 │   ├── config.mk.in     # ORFS config TEMPLATE -- the single definition
 │   └── constraint.sdc.in# SDC TEMPLATE. Edit these; never the generated copies.

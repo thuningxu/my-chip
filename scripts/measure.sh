@@ -60,6 +60,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Extra yosys synth args. Only amx_fp8 overrides this; see config.mk.in.
+SYNTH_ARGS=""
+
 # shellcheck source=scripts/nick.sh
 source "$HERE/scripts/nick.sh"
 
@@ -106,6 +109,9 @@ case "$DESIGN" in
     TOP_PARAMS="RD_REG $RDREG"
     SIM_PARAMS=(-Ptb_amx_fp8.RD_REG="$RDREG")
     CFG_DESC="RD_REG=$RDREG"
+    # See config.mk.in: `share` cannot help a design whose 1024 adders all run
+    # every cycle, and it does not terminate in reasonable time on this one.
+    SYNTH_ARGS="-noshare"
     ;;
   *)
     echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd, tpu_mmu, amx_fp8" >&2
@@ -180,6 +186,7 @@ sed -e "s|@NICK@|$NICK|g" \
     -e "s|@VERILOG_FILES@|$RTL_LIST|g" \
     -e "s|@TOP_PARAMS@|$TOP_PARAMS|g" \
     -e "s|@UTIL@|$UTIL|g" \
+    -e "s|@SYNTH_ARGS@|$SYNTH_ARGS|g" \
     -e "s|@PERIOD_PS@|$PERIOD_PS|g" \
     -e "s|@RTL_DIR@|$HERE/rtl|g" \
     -e "s|@CFG_DIR@|$CFG_DIR|g" \

@@ -30,6 +30,16 @@ export SDC_FILE      = @CFG_DIR@/constraint.sdc
 #              TDPBF8PS/TDPBHF8PS/TDPHBF8PS/TDPHF8PS)
 export VERILOG_TOP_PARAMS = @TOP_PARAMS@
 
+# Extra arguments for yosys's `synth`, per design. Empty for every design that
+# does not need it, which leaves `synth -flatten -run :fine` exactly as before.
+#
+# amx_fp8 passes -noshare, and it is a correctness-of-effort argument rather than
+# a speed hack: `share` is SAT-based resource sharing over the coarse arithmetic
+# cells, and in a design where all 1024 FP32 adders are active every single cycle
+# there is nothing to share. Measured: the coarse phase takes 40 s with -noshare
+# and had not finished after 27 MINUTES without it.
+export SYNTH_ARGS = @SYNTH_ARGS@
+
 export CORE_UTILIZATION       = @UTIL@
 export PLACE_DENSITY_LB_ADDON = 0.2
 
