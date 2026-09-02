@@ -345,7 +345,7 @@ golden:
 .PHONY: schematic
 schematic:
 	@YOSYS_EXE="$(YOSYS_EXE)" ./scripts/schematic.sh -d $(DESIGN) -n $(SN) -c $(CPORT) \
-	     -r $(OUTPAR) -s $(SAT)
+	     -r $(OUTPAR) -s $(SAT) -T $(TN) -A $(ACC) -W $(ACCW)
 
 #-----------------------------------------------------------------------------
 # Physical flow. measure.sh re-runs the regression itself and refuses to

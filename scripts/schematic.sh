@@ -775,13 +775,18 @@ MULCHK
   fi
 
   # ---- 4 and 5. the ACC=1 units --------------------------------------------
+  # NAMES: 04_fxcvt and 05_maxmag, not 04_fx2fp32 -- view() names the module it
+  # extracts after the view with the NN_ prefix stripped, so 04_fx2fp32 tries to
+  # create a SECOND module called fx2fp32 and yosys aborts with
+  # `Assert modules_.count(module->name) == 0 failed`. Same reason 01_mul8 is not
+  # called 01_fp8_mul. 05_maxmag is safe because the module is maxmag64.
   if [[ "$ACC" != "0" ]]; then
     # What replaced fp32_add inside the loop. The LZC, normalise shifter and
     # rounder still exist -- they have just moved OUT of the accumulation and into
     # a once-per-element epilogue, which is the whole arithmetic argument.
     TOPMOD=fx2fp32
     CHPARAM="-set ACC_W $FXW"
-    view 04_fx2fp32 \
+    view 04_fxcvt \
       "fx2fp32 -- the ONE rounding, moved out of the loop" \
       "256 instances. LZC + normalise + RNE, once per element instead of 64 times." \
       '' \
@@ -812,7 +817,7 @@ MULCHK
     echo "why these show the repeated units instead."
   else
     echo "   03_add32           now only the += C, 256 instances, OUT of the loop"
-    echo "   04_fx2fp32         the one rounding per element, FX_W=$FXW"
+    echo "   04_fxcvt           the one rounding per element, FX_W=$FXW"
     echo "   05_maxmag          the alignment reference, once on the start edge"
     echo
     echo "Coarse cells BEFORE technology mapping. Unit 1 is still 1024 instances, but"
