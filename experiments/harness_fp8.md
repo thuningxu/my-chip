@@ -209,3 +209,39 @@ sweep would prejudge that.
 specials 768 + `rd_data` 512 + control ≈ **38,379**, against `ACC=0`'s 57,867.
 `trial.sh`'s `EXPECT_FF` checks it. During the `amx_tdpbssd` campaign an unchecked
 flop count let a trial run for 17 minutes as a duplicate of its own baseline.
+
+### CORRECTION to X2's width, appended before any trial ran
+
+The `ACC_W` table above was measured with an **unbounded** Python accumulator, so it
+modelled only low-end truncation. Real hardware also needs top-end carry headroom:
+`max|product| ≤ 1.76 × 2^ref`, and 64 of them reach `2^(ref+6.8)`, so a two's
+complement accumulator's top bit must sit at `2^(ref+7)`. That makes the LSB
+`LOW = ref + 8 − ACC_W`, giving **`ACC_W − 8` bits below the reference** where the
+first sweep assumed `ACC_W − 2`.
+
+Re-measured with the true hardware model, 1500 random dot products, and an explicit
+overflow check on every accumulation:
+
+| `ACC_W` | worst rel. error | p99 | matches exact | overflows |
+|---|---|---|---|---|
+| 40 | 5.77e-04 | 1.27e-05 | 45% | 0 |
+| 44 | 2.75e-05 | 6.57e-07 | 87% | 0 |
+| 48 | 9.0e-07 | 7.8e-08 | 98% | 0 |
+| **52** | **8.56e-08** | **0** | **100%** | **0** |
+| 56 | 0 | 0 | 100% | 0 |
+
+**Y1's width becomes `ACC_W = 52`**, not 48. 44 is p1 parity; 48 is 29× better than
+p1 but not exact; 52 is ~1 ULP worst case and matches the exact rational sum on 100%
+of trials. The accumulator is only `256 × ACC_W` flops, so 52 versus 48 costs ~1,000
+flops out of ~39,000 — not worth trading accuracy for.
+
+Zero overflows at every width confirms the `+8` headroom derivation empirically
+rather than by algebra alone.
+
+Revised flop prediction for **Y1** (`ACC=1 ACC_W=52`): tiles 24,576 + accumulators
+256×52 = 13,312 + `maxmag` 224 + specials 768 + `rd_data` 512 + control ≈ **39,403**.
+
+*This correction is appended rather than edited in because the original number is
+evidence about the reasoning. It was caught because declaring the generation first
+forced the width to be written down and therefore checked — before any RTL existed
+and before a route was spent on it.*
