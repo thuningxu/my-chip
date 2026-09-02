@@ -5,21 +5,33 @@
 | `mac_array.v` | INT4 outer-product MAC array — the **v0 baseline**, deliberately the simplest *correct* design so there is somewhere to climb from | 16 multipliers at N=4 |
 | `amx_tdpbssd.v` | **Intel AMX `TDPBSSD`** — INT8 tile dot-product, `C += A@B`, with optional INT32 saturation | 1024 multipliers, 16 cycles |
 | `tpu_mmu.v` | **TPU v1-style weight-stationary systolic array** — `C += A@W`, N×N INT8, weights resident in the PEs, accumulators outside the array | 1024 multipliers at `N=32`, 3N cycles |
+| `amx_fp8.v` | **Intel AMX-FP8** (Diamond Rapids) — all four mix-and-match variants in one netlist, `op[1:0]` at runtime. fp8 in, **IEEE FP32 accumulate** | 1024 multipliers + 1024 FP32 adders, 20 cycles |
+| `fp8_mul.v` | `fp8_dec` (E5M2/E4M3 → a common 4-bit significand, DAZ) + `fp8_mul` (exact 4×4 product into FP32). Leaf blocks of `amx_fp8` | 146 cells; 1024 instances |
+| `fp32_add.v` | IEEE binary32 adder — RNE, DAZ in, FTZ out, Inf/NaN. **1198 cells, ~6.2 ns, and it sits inside a feedback loop 1024 times over** | the design's frequency floor |
 
-All three are independent top-level modules with no shared code. `measure.sh -d`
-selects which one to build, and each is passed only its own file — the ORFS
-config used to glob `rtl/*.v`, which meant a syntax error in one broke synthesis
-of the other.
+The first three are independent top-level modules with no shared code.
+`amx_fp8` is the exception and deliberately so: `fp32_add` appears 1024 times and
+is also reused by the epilogue, so it is a real module with its own exhaustive
+testbench rather than inlined logic. `measure.sh -d` selects which design to
+build and passes only that design's files — the ORFS config used to glob
+`rtl/*.v`, which meant a syntax error in one broke synthesis of the others.
 
-`amx_tdpbssd` and `tpu_mmu` are deliberately the **same arithmetic at opposite
-architectures**, 1024 INT8 multipliers each:
+Three designs at **1024 multipliers each**, which is what makes them
+comparable at all. Read the columns as two separate experiments:
 
-| | `amx_tdpbssd` | `tpu_mmu` at `N=32` |
-|---|---|---|
-| operand delivery | **broadcast** — one 512-bit row fans out to 16 units, each through a 16:1 mux | **systolic** — every hop register-to-register between neighbours, nothing fanning out past one cell |
-| accumulator | **inside** the cell, so its feedback loop cannot be pipelined at any depth | **outside** the array, so the array is pure feed-forward and the only feedback is one adder |
-| a unit is | 4 multipliers + a 3-level tree + a saturating fold, all in the loop | 1 multiplier + 1 adder + 1 flop |
-| cycles / operation | 17 + `PIPE` | 3N (fill and drain are 2N−2 of it) |
+| | `amx_tdpbssd` | `tpu_mmu` at `N=32` | `amx_fp8` |
+|---|---|---|---|
+| operand delivery | **broadcast** — one 512-bit row fans out to 16 units, each through a 16:1 mux | **systolic** — every hop register-to-register between neighbours, nothing fanning out past one cell | **broadcast, identical to `amx_tdpbssd`** |
+| accumulator | **inside** the cell, so its feedback loop cannot be pipelined at any depth | **outside** the array, so the array is pure feed-forward and the only feedback is one adder | four **FP32** accumulators per cell, in the cell |
+| arithmetic | INT8 × INT8 → INT32, exact | INT8 × INT8 → INT32, exact | fp8 × fp8 (exact) → **64 rounded IEEE FP32 adds** |
+| a unit is | 4 multipliers + a 3-level tree + a saturating fold, all in the loop | 1 multiplier + 1 adder + 1 flop | 1 multiplier (4×4!) + **1 full FP32 adder**, in the loop |
+| cycles / operation | 17 + `PIPE` | 3N (fill and drain are 2N−2 of it) | 20 (16 accumulate + 3 epilogue + 1) |
+
+`tpu_mmu` vs `amx_tdpbssd` moves **two** variables at once — operand delivery
+*and* accumulator placement — so its result cannot be attributed to either. That
+is recorded in its merge commit and is the reason `amx_fp8` exists in this shape:
+it holds operand delivery *identical* to `amx_tdpbssd` and changes only the
+arithmetic. One variable, one attributable answer.
 
 ---
 

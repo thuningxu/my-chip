@@ -830,3 +830,219 @@ t1 row came out labelled `N=4` when the design was built at `TN=32`. The artifac
 name (`tpu_n32`) and `VERILOG_TOP_PARAMS` were both correct, so only the printed
 row was wrong — but a metrics table that mislabels its own configuration is exactly
 the class of defect this log exists to catch. Fixed.
+
+---
+
+## Results — amx_fp8
+
+**Intel AMX-FP8** (Diamond Rapids): all four mix-and-match variants in ONE netlist,
+selected at runtime by `op[1:0]` — `op[1]` = A is HF8, `op[0]` = B is HF8, so the
+encoding reads as the mnemonic.
+
+| op | mnemonic | src1 (A) | src2 (B) |
+|---|---|---|---|
+| 00 | `TDPBF8PS` | BF8 = E5M2 | BF8 = E5M2 |
+| 01 | `TDPBHF8PS` | BF8 = E5M2 | HF8 = E4M3 |
+| 10 | `TDPHBF8PS` | HF8 = E4M3 | BF8 = E5M2 |
+| 11 | `TDPHF8PS` | HF8 = E4M3 | HF8 = E4M3 |
+
+`C[16][16]` fp32 `+= A[16][64]` fp8 `@ B[64][16]` fp8 — 16,384 MACs in 20 cycles,
+1024 fp8 multipliers and **1024 IEEE FP32 adders**, four independent FP32
+accumulators per output element, RNE rounding, DAZ in / FTZ out.
+
+**Why it exists.** The `tpu_mmu` row above cannot attribute its result, because it
+moved TWO variables at once — operand delivery *and* accumulator placement. This
+design moves ONE. It reuses `amx_tdpbssd`'s operand delivery **exactly**: same 16×64
+register tiles, same 16:1 mux on B's row, same per-row 16:1 mux on A's dword, same
+k-outermost schedule. And it happens to land on the **same cycle count**, because
+`amx_tdpbssd` at `PIPE=3` is also 20 cycles. So MACs, latency and operand delivery
+are all identical, and the only thing that differs is the arithmetic.
+
+| # | Design | Stage | Period | Setup WS | reg→reg fmax | Limiter | DRC | Hold WS | Cycles/op | stdcells | flip-flops | area µm² | power W |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| p1 | `amx_fp8` `RD_REG=1` | routed | 4.00 ns | **−1.7128** | **175.0 MHz** | `reg→reg` | **0** | **+0.0448** | 20 (sim) | 3,985,240 | 57,867 | 4,758,450 | 40.3523 |
+
+Setup is NOT met at 4.00 ns, and that is the informative outcome rather than a
+failure: `TNS = −60,409 ns` with four separate optimisation stages each failing to
+move it is this log's own signature for a **real wall**. The 7.00 ns run that was
+started first was aborted precisely because it would have closed with `|TNS| ≈ 0`
+and measured the constraint instead of the hardware.
+
+Flop count predicted **57,867** before the run, actual **57,867** — exact. Breakdown:
+`lacc` 32,768 (256 cells × 4 lanes × 32 b) + A tile 8,192 + B tile 8,192 + `cacc`
+8,192 + `rd_data` 512 + control 11. Confirmed four ways: netlist `DFF` count, the
+pre-CTS `clk` net fanout, CTS's sink count, and the final cell report.
+
+### Head-to-head: same MACs, same cycles, same operand delivery
+
+| | amx broadcast INT8 | amx broadcast **FP8** | ratio |
+|---|---|---|---|
+| arithmetic | INT8×INT8 → INT32, exact | fp8×fp8 (exact) → **64 rounded IEEE FP32 adds** | — |
+| MACs / instruction | 16,384 | 16,384 | **1.00×** |
+| cycles / instruction | 20 | 20 | **1.00×** |
+| reg→reg fmax | 698.9 MHz | **175.0 MHz** | **0.25×** |
+| throughput | 572.5 GMAC/s | **143.4 GMAC/s** | **0.25×** |
+| flip-flops | 47,116 | 57,867 | 1.23× |
+| std cells | 532,445 | **3,985,240** | **7.48×** |
+| area µm² | 1,046,050 | 4,758,450 | 4.55× |
+| DRC | 0 | 0 | — |
+| hold | +0.0386 met | +0.0448 met | both clean |
+
+**Bit-exact IEEE FP32 accumulation costs 4.0× the clock, 4.0× the throughput and
+7.5× the cells against INT32 accumulation, at identical MAC count, identical
+latency and identical operand delivery.** Because MACs and cycles match exactly,
+the throughput ratio *is* the frequency ratio — no accounting required.
+
+The multiplier is not the cost. One 4×4 significand multiply serves all four
+instructions (both formats decode to a common 4-bit left-aligned significand), and
+`fp8_mul` maps to **181 cells against `fp32_add`'s 2,270**. FP8 arithmetic is
+cheaper than INT8 to multiply and vastly more expensive to accumulate.
+
+### The critical path, and the claim it refutes
+
+Routed, with parasitics. Startpoint `ccnt[1]`, endpoint
+`g_m[1].g_n[13].lacc[49]`, **113 gate levels**:
+
+| segment | delay | gates |
+|---|---|---|
+| clock network to launch flop | 1.276 ns | — |
+| `ccnt` CLK→Q | 0.151 ns | — |
+| operand mux + buffers | **0.864 ns** | 13 |
+| `fp8_mul` | **1.157 ns** | 19 |
+| `fp32_add` | **3.306 ns** | 77 |
+| final gates → `lacc/D` | 0.046 ns | — |
+| **data path from Q** | **5.373 ns** | **113** |
+
+I predicted before measuring that the limiter would be the
+`lacc → fp32_add → lacc` feedback loop and that **no feed-forward pipelining could
+move it**. The endpoint is indeed a lane accumulator, and the limiter class is
+`reg→reg` (so the 175.0 MHz is honest, with no I/O-delay inflation — `overall` and
+`regreg` are the same path). But the second half of that prediction is **WRONG**:
+the path *launches from `ccnt`*, so **2.021 ns — 38% of the data path — is
+feed-forward logic ahead of the adder.** A single pipeline register at the adder
+input would remove it, putting the design near ~3.5 ns / ~285 MHz.
+
+The true accumulator loop is only the 3.306 ns adder segment, and that is the floor
+a `PIPE` ladder would converge to. It also validates the leaf measurement in
+hindsight: `fp32_add` alone measured 2.491 ns pre-layout and 3.306 ns routed, a
+sane 1.33× for real parasitics and in-array fanout. The error was comparing a
+standalone-leaf number to a whole path.
+
+### What the ISA does not settle, quantified
+
+Three sources disagree on how AMX-FP8 accumulates. Intel's patent EP4398097A2 says
+the four byte-lane products are accumulated **separately** — four running sums,
+combined with C at the end — and that is what is built. Bochs (`cpu/avx/amx.cc`)
+keeps two running halves with a pairwise tree, which looks like its BF16 code shape
+carried over to FP8's four lanes. LLVM's `amxfp8intrin.h` shows one wide
+accumulator but wraps its fp8 operands in `INT64(...)` copy-pasted from the INT8
+header, so it was discarded.
+
+**Genuinely unresolved: the order the four lane sums are combined.** A balanced tree
+is used, on hardware grounds — two adder levels instead of three, three epilogue
+cycles instead of four. It is not cosmetic: `tb/fp8_golden.py` computes both
+orderings and prints how far apart they are on every run.
+
+```
+[INFO] epilogue order UNRESOLVED in the sources: balanced tree vs
+       sequential differ in 118/512 elements (23.05%)
+```
+
+23% of the output. So this design is bit-exact for every finite and infinite input
+**given** the balanced tree, and the model can switch with one flag if better
+documentation appears. Also deviating: NaN results are canonicalised to
+`0x7FC00000` rather than propagating a source payload.
+
+### Verified independent of any PPA number
+
+Leaves first, because a rounding bug 1024 instances deep inside a 16-cycle
+accumulation is indistinguishable from a schedule bug.
+
+| gate | what it establishes |
+|---|---|
+| `tb_fp8_mul.v` | **EXHAUSTIVE** — all 4 format pairs × 256 × 256 = 262,144 cases against an independently written 24×24 model, four checksums tied to Python, and every product proven **exact** |
+| `tb_fp32_add.v` | 121,376 checks — RNE ties at both parities, the alignment cap, deep cancellation, DAZ, the FTZ boundary at `e_fin` = 0/1/2, the full Inf/NaN matrix, commutativity on **every** vector |
+| `tb_amx_fp8.v` | 28 cases × `RD_REG` 0/1; all four instructions **bit-exact** against `tb/fp8_golden.py` |
+| mutation | 42 mutations; every real one caught |
+
+Four mutation survivors were investigated and proved to be **genuine no-ops**,
+recorded in the RTL so they are not mistaken for gaps: the alignment cap 27-vs-26
+(a normal's leading 1 already lands in the sticky position at 26 — capping at 25 or
+24 IS caught), and epilogue writes to lanes 1 and 3 (dead registers; EP0 consumes
+them on the same edge that overwrites lanes 0 and 2). Two genuine gaps were found
+and closed: the FTZ boundary at `e_fin == 0`, and `op` being latched at `start`.
+
+`fp8_golden.py`'s second FP32 adder converts to Python floats, adds in FP64 and
+rounds to FP32. That is sound for a **single** add because 53 ≥ 2p+2 = 50
+(innocuous double rounding); overflow and underflow break the theorem and are
+refused loudly rather than returned wrong.
+
+### Routing closed, and the congestion warning was pessimistic
+
+The global placer reported it **could not reach its routability target** and settled
+at weighted congestion 0.9969 — essentially exactly at capacity, on the full
+metal2–metal10 stack. That looked like the run's real risk. It was not:
+
+```
+global route     converged using 2 of 30 congestion iterations, 2m45s
+detailed route   820,738 -> 318,273 -> 289,183 -> 8,127 -> 95 -> 10 -> 3 -> 3 -> 0
+                 closed at iteration 8 of a 64 budget
+```
+
+Final: **0 DRC**, 0 antenna diodes, 60,586,359 µm of routed wire, 25,050,772
+single-cut vias, and a GDS verified by read-back (top cell `amx_fp8`, die
+3065.3 × 3065.3 µm) rather than by existence.
+
+Hold is **fully clean** (`+0.0448` met, 0 violations) because `--hold-margin 0.05`
+was passed from the start — the omission that left the `tpu_mmu` row dirty at
+−0.0278 over 180 endpoints. CTS inserted **49,454 hold buffers** to get there, on a
+clock tree of 11,094 buffers with a uniform 16-buffer depth and 0.196 ns setup skew.
+
+**Power reads 40.35 W and is not credible**, per the same caveat as every row above:
+this log's own rows span 19.0 W to 0.99 W for one design at one target.
+
+### Three process failures worth recording
+
+1. **A leaf benchmark is not a flow benchmark.** `fp32_add` was measured standalone
+   with `abc -liberty` (1,260 cells, 6.180 ns) and used to project the design. ORFS
+   maps with `abc_speed.script` plus `upsize`/`dnsize`, which gives **2,270 cells at
+   2.491 ns** — 1.80× the area for 2.48× the speed. So the projection was **1.86×
+   low on cells and 2.5× slow on timing**, and the bad timing number is what caused
+   a 7.00 ns target to be chosen and a run to be thrown away. Benchmark a leaf with
+   the flow's own recipe or not at all.
+
+2. **Intermediate log tables are not results.** The design's area was misreported
+   three times (+23%, then +67%, then a synthesis figure compared against another
+   row's routed figure) by quoting running repair tables. A post-CTS "540× setup
+   improvement" was also reported that never happened — it was a *hold* repair
+   table, identifiable by its narrow column set and sub-nanosecond TNS. Only
+   stage-final metrics JSON is quotable.
+
+3. **`share` cannot help a design where nothing is shareable, and will not say so.**
+   yosys's SAT-based resource sharing had not finished after 27 MINUTES on this
+   design, where all 1024 adders are active every cycle. With `-noshare` the coarse
+   phase takes **40 seconds**. Separately, keeping `fp32_add`/`fp8_mul` hierarchical
+   cut whole-synthesis from ">34 min and still in ABC" to **90 s**, at +1.7% area —
+   because flattening makes ABC optimise 1024 independent copies of identical logic.
+   yosys is single-threaded with no `-j`; OpenROAD already uses all 18 cores. The
+   fix had to be doing less work, not spreading it.
+
+Keeping the modules hierarchical also exposed a latent bug: yosys emits
+`input signed [5:0] a_exp;` into the netlist and **OpenSTA's Verilog reader rejects
+`signed`** (`STA-0171`), killing the run at `1_synth`. Invisible while flattened,
+because then there are no submodule ports at all. Fixed at the root — those ports
+are unsigned now, since every use site already sign-extends explicitly.
+
+### What this row sets up
+
+The measured breakdown says the next experiment is not a guess:
+
+1. **A `PIPE` register at the adder input.** 2.021 ns of the 5.373 ns data path is
+   feed-forward. This is the single highest-value change and the row above is what
+   justifies it.
+2. **Pipelining `fp32_add` itself**, which needs interleaved accumulators so the
+   adder is not in a one-cycle loop — the only thing that shortens a 77-gate,
+   3.306 ns combinational block.
+3. **A narrow-operand accumulate adder.** The accumulate step's second operand is a
+   product with only 8 significant bits; the epilogue reuse is what forces a general
+   FP32 adder. Not taken here deliberately.

@@ -23,8 +23,40 @@ export SDC_FILE      = @CFG_DIR@/constraint.sdc
 # Top-level parameters, which differ per design -- measure.sh builds this string.
 # mac_array:   N <n> C_PORT <c> OUT_PAR <r>   (flip-flop counts verified to
 #              track N*N*ACC_W + control at both N=4 and N=16)
-# amx_tdpbssd: SAT <s>
+# amx_tdpbssd: SAT <s> PIPE <p> RD_REG <r>
+# tpu_mmu:     N <n> RD_REG <r>
+# amx_fp8:     RD_REG <r>                   (the four instructions are a RUNTIME
+#              input op[1:0], not a build parameter -- one netlist runs all of
+#              TDPBF8PS/TDPBHF8PS/TDPHBF8PS/TDPHF8PS)
 export VERILOG_TOP_PARAMS = @TOP_PARAMS@
+
+# Extra arguments for yosys's `synth`, per design. Empty for every design that
+# does not need it, which leaves `synth -flatten -run :fine` exactly as before.
+#
+# amx_fp8 passes -noshare, and it is a correctness-of-effort argument rather than
+# a speed hack: `share` is SAT-based resource sharing over the coarse arithmetic
+# cells, and in a design where all 1024 FP32 adders are active every single cycle
+# there is nothing to share. Measured: the coarse phase takes 40 s with -noshare
+# and had not finished after 27 MINUTES without it.
+export SYNTH_ARGS = @SYNTH_ARGS@
+
+# Hierarchy retention, per design. ORFS reads SYNTH_HIERARCHICAL as a bare
+# $::env(), so it must always be defined; 0 is ORFS's own default (flatten
+# everything) and is what the first three designs have always had.
+#
+# amx_fp8 sets 1 and keeps fp32_add and fp8_mul, and the reason is arithmetic
+# rather than taste: the design instantiates ONE 1260-cell adder 1024 times, and
+# flattening makes ABC optimise 1024 independent copies of identical logic.
+# MEASURED on this design: whole synthesis in 90 s / 1.7 GB kept hierarchical,
+# versus 34 MINUTES still inside ABC when flattened. The cost is real and small
+# -- fp32_add maps to 1392.5 um2 instead of 1368.8 (+1.7%) because
+# keep_hierarchy blocks cross-boundary optimisation -- and it is worth paying to
+# make every re-measurement of this design affordable.
+#
+# Note yosys is single-threaded and has no -j: this redundancy, not serialism, is
+# what makes a design of 1024 identical blocks slow to synthesise.
+export SYNTH_HIERARCHICAL = @SYNTH_HIER@
+export SYNTH_KEEP_MODULES = @SYNTH_KEEP@
 
 export CORE_UTILIZATION       = @UTIL@
 export PLACE_DENSITY_LB_ADDON = 0.2

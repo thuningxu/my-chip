@@ -1,6 +1,6 @@
 # tb/ — verification
 
-Six files, three designs, and a deliberate independence structure:
+Ten files, four designs, and a deliberate independence structure:
 
 | File | Role |
 |---|---|
@@ -10,6 +10,10 @@ Six files, three designs, and a deliberate independence structure:
 | `amx_golden.py` | a **fourth** opinion on TDPBSSD: VNNI pack/unpack and both saturation modes |
 | `tb_tpu_mmu.v` | the `tpu_mmu` systolic regression — 12 cases plus a cross-language tie |
 | `tpu_golden.py` | the systolic **schedule proof** — a cycle-accurate model that threads the output row index through the array and asserts every contribution to one accumulator came from the same row |
+| `tb_fp32_add.v` | the FP32 adder, **alone**: 121,376 checks. Runs *before* the array regression on purpose |
+| `tb_fp8_mul.v` | the fp8 multiplier, **exhaustively**: all 4 format pairs × 256 × 256 = 262,144 cases |
+| `tb_amx_fp8.v` | the `amx_fp8` array regression — 28 cases × `RD_REG` 0/1, all four instructions |
+| `fp8_golden.py` | **two** independent FP32 adders plus an exact rational yardstick, and the one number that quantifies what the ISA does not say |
 
 `tpu_golden.py` splits its models by **kind, not language**, and the reason is the
 rule stated in `amx_golden.py`: three models that agree are evidence, two models
@@ -30,6 +34,53 @@ forms depending on where you sample:
 
 None is the others' typo. Writing the Python model *first* meant finding that in
 seconds instead of while debugging Verilog.
+
+## amx_fp8: verify the leaves first, then only the schedule
+
+The FP8 design inverts the usual order, because its arithmetic is the risk. A
+rounding bug in `fp32_add` would appear 1024 instances deep inside a 16-cycle
+accumulation, presenting as "some matrix elements are off by an ulp" — which is
+indistinguishable from a schedule bug, a lane-mapping bug, or a format-decode
+bug. So the leaves are proven first and in isolation:
+
+| gate | what it establishes |
+|---|---|
+| `tb_fp8_mul.v` | **the entire input space.** 4 format pairs × 256 × 256, against a model that takes a longer route (24×24 significand multiply, not the DUT's 4×4), four checksums tied to `fp8_golden.py`, and every product shown to be **exact** |
+| `tb_fp32_add.v` | RNE ties at both parities, the alignment cap, deep cancellation, DAZ, the FTZ boundary at `e=0/1/2`, the full Inf/NaN matrix, and **commutativity on every single vector** — which is what catches a broken magnitude swap |
+| `tb_amx_fp8.v` | only then the array: VNNI interleave, k schedule, lane→accumulator mapping, epilogue order, cycle count, format plumbing |
+
+Because the leaves are proven, `tb_amx_fp8.v` uses **them** as its oracle — one
+`fp8_dec` pair, one `fp8_mul`, one `fp32_add`, instantiated outside the DUT and
+sequenced by tasks. That is compositional verification, not circularity: a
+mismatch can then only be a schedule or layout fault, which is exactly the
+localisation you want. Writing a third Verilog FP32 adder would have added a
+possible bug, not a possible catch. The tie to a *fully* independent
+implementation is the golden block in case T3, whose constants come from
+`fp8_golden.py`.
+
+`fp8_golden.py`'s second adder is worth naming, because it looks like cheating
+and is not: it converts to Python floats, adds in FP64, and rounds to FP32. For a
+**single** addition of two FP32 values that is provably identical to a direct FP32
+RNE add, because 53 ≥ 2p+2 = 50 (innocuous double rounding). The theorem excludes
+overflow and underflow, so both are refused loudly rather than returned wrong.
+That model reaches the C library's adder — hardware nobody in this repo wrote.
+
+### The one number that admits what the ISA does not say
+
+Three sources disagree on how AMX-FP8 accumulates, and `fp8_golden.py` does not
+paper over it. Intel's patent says four separate lane sums; Bochs keeps two
+halves; LLVM's header shows one wide accumulator with `INT64` casts pasted from
+the INT8 file. The patent reading is implemented — but the *order the four lane
+sums are combined* is genuinely unspecified, so the self-test computes both
+orderings and prints how far apart they are:
+
+```
+[INFO] epilogue order UNRESOLVED in the sources: balanced tree vs
+       sequential differ in 118/512 elements (23.05%)
+```
+
+23% is not a rounding curiosity, it is a quarter of the output. Printing it on
+every run is the difference between a documented gap and a silent assumption.
 
 `tb_amx_tdpbssd.v` carries three models rather than one because the AMX tile
 layout has two independent ways to be wrong:

@@ -60,6 +60,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Extra yosys synth args. Only amx_fp8 overrides this; see config.mk.in.
+SYNTH_ARGS=""
+# Hierarchy retention. 0 = ORFS default (flatten everything).
+SYNTH_HIER=0
+SYNTH_KEEP=""
+
 # shellcheck source=scripts/nick.sh
 source "$HERE/scripts/nick.sh"
 
@@ -93,8 +99,28 @@ case "$DESIGN" in
     SIM_PARAMS=(-Ptb_tpu_mmu.N="$TN" -Ptb_tpu_mmu.RD_REG="$RDREG")
     CFG_DESC="N=$TN RD_REG=$RDREG"
     ;;
+  amx_fp8)
+    NICK="$(nick_fp8 "$TAG")"
+    # Three files. RTL_LIST is expanded UNQUOTED both into the iverilog gate
+    # below and into @VERILOG_FILES@, so a space-separated list needs no
+    # plumbing change. fp32_add and fp8_mul are separate modules because each is
+    # instantiated ~1000 times and each has its own exhaustive testbench.
+    RTL_LIST="$HERE/rtl/amx_fp8.v $HERE/rtl/fp8_mul.v $HERE/rtl/fp32_add.v"
+    TB_FILE="$HERE/tb/tb_amx_fp8.v"
+    # The four instructions are a RUNTIME input (op[1:0]), not a build
+    # parameter, so RD_REG is the only thing to configure.
+    TOP_PARAMS="RD_REG $RDREG"
+    SIM_PARAMS=(-Ptb_amx_fp8.RD_REG="$RDREG")
+    CFG_DESC="RD_REG=$RDREG"
+    # See config.mk.in: `share` cannot help a design whose 1024 adders all run
+    # every cycle, and it does not terminate in reasonable time on this one.
+    SYNTH_ARGS="-noshare"
+    # 1024 instances of ONE adder: map it once. See config.mk.in for the numbers.
+    SYNTH_HIER=1
+    SYNTH_KEEP="fp32_add fp8_mul"
+    ;;
   *)
-    echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd, tpu_mmu" >&2
+    echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd, tpu_mmu, amx_fp8" >&2
     exit 2 ;;
 esac
 
@@ -166,6 +192,9 @@ sed -e "s|@NICK@|$NICK|g" \
     -e "s|@VERILOG_FILES@|$RTL_LIST|g" \
     -e "s|@TOP_PARAMS@|$TOP_PARAMS|g" \
     -e "s|@UTIL@|$UTIL|g" \
+    -e "s|@SYNTH_ARGS@|$SYNTH_ARGS|g" \
+    -e "s|@SYNTH_HIER@|$SYNTH_HIER|g" \
+    -e "s|@SYNTH_KEEP@|$SYNTH_KEEP|g" \
     -e "s|@PERIOD_PS@|$PERIOD_PS|g" \
     -e "s|@RTL_DIR@|$HERE/rtl|g" \
     -e "s|@CFG_DIR@|$CFG_DIR|g" \
