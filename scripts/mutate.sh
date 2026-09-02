@@ -79,12 +79,29 @@ if ! iverilog -g2005 -o "$WORK/base.vvp" $PFLAGS "$TB" "$RTL" \
   echo "${RED}baseline does not COMPILE -- nothing below would mean anything${OFF}" >&2
   cat "$WORK/base.log" >&2; exit 1
 fi
-if ! "$WORK/base.vvp" >"$WORK/base.out" 2>&1 || ! grep -q 'PASSED' "$WORK/base.out"; then
+# Two pass conventions exist in this repo: `RESULT: PASS`, which the Makefile
+# greps for, and `*** PASSED ***`. Accept either -- an earlier version only knew
+# the second and reported tb_amx_fp8's clean baseline as a failure.
+PASS_RE='(\*\*\* PASSED \*\*\*|^RESULT: PASS)'
+if ! "$WORK/base.vvp" >"$WORK/base.out" 2>&1 \
+   || ! grep -Eq "$PASS_RE" "$WORK/base.out"; then
   echo "${RED}baseline does not PASS -- fix the design or the testbench first${OFF}" >&2
   tail -20 "$WORK/base.out" >&2; exit 1
 fi
 BASE_CHECKS=$(grep -o 'checks *: *[0-9]*' "$WORK/base.out" | grep -o '[0-9]*' | tail -1)
-echo "  ${GRN}PASSED${OFF}  ${BASE_CHECKS:-?} checks"
+if [[ -z "$BASE_CHECKS" ]]; then
+  BASE_CHECKS=$(grep -Eo '^=== [0-9]+ passed' "$WORK/base.out" \
+                  | grep -Eo '[0-9]+' | tail -1)
+  [[ -n "$BASE_CHECKS" ]] && BASE_CHECKS="$BASE_CHECKS cases"
+fi
+# BASE_CHECKS already carries its own unit when it came from the case-count
+# fallback ("24 cases"), so do not append "checks" a second time. Computed once
+# into a variable: an inline `case` inside $(...) broke the summary line.
+case "$BASE_CHECKS" in
+  *cases) BASE_LABEL="$BASE_CHECKS" ;;
+  *)      BASE_LABEL="${BASE_CHECKS:-?} checks" ;;
+esac
+echo "  ${GRN}PASSED${OFF}  $BASE_LABEL"
 echo
 
 #---------------------------------------------------------------- mutations
@@ -124,8 +141,26 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   fi
 
   "$WORK/m.vvp" >"$WORK/m.out" 2>&1
-  nfail=$(grep -c '^FAIL' "$WORK/m.out")
-  if grep -q 'PASSED' "$WORK/m.out"; then
+  # Prefer the testbench's OWN tally over counting FAIL lines. Testbenches cap how
+  # many failures they print (tb_maxmag64 stops at 19), so counting printed lines
+  # made every mutation report the same "19 failing vectors" -- a number that looks
+  # like a measurement and is actually the display limit.
+  # Three report shapes exist in this repo's testbenches:
+  #   "  errors   : N"            tb_fx2fp32, tb_maxmag64
+  #   "=== N passed, M failed ==="  tb_amx_fp8, tb_fp32_add, tb_fp8_mul
+  #   "  [FAIL] ..." lines         all of them, but capped for display
+  # Try the two summary forms first and fall back to counting lines, which is
+  # labelled `printed` because testbenches cap it.
+  nfail=$(grep -Eo '^ *(errors|fail_count) *: *[0-9]+' "$WORK/m.out" \
+            | grep -Eo '[0-9]+' | tail -1)
+  if [[ -z "$nfail" ]]; then
+      nfail=$(grep -Eo '^=== [0-9]+ passed, [0-9]+ failed' "$WORK/m.out" \
+                | grep -Eo '[0-9]+ failed' | grep -Eo '[0-9]+' | tail -1)
+  fi
+  if [[ -z "$nfail" ]]; then
+      nfail="$(grep -cE '\[FAIL\]|^FAIL' "$WORK/m.out") printed"
+  fi
+  if grep -Eq "$PASS_RE" "$WORK/m.out"; then
     if [[ $expect_survive -eq 1 ]]; then
       printf '%-40s %ssurvived, as expected (proven equivalent)%s\n' "$name" "$DIM" "$OFF"
       NEQ=$((NEQ+1))
@@ -138,7 +173,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       printf '%-40s %sKILLED, but was declared equivalent%s\n' "$name" "$RED" "$OFF"
       NEQBAD=$((NEQBAD+1)); EQBAD="$EQBAD  $name"$'\n'
     else
-      printf '%-40s killed (%s failing vectors)\n' "$name" "$nfail"
+      printf '%-40s killed (%s failing checks)\n' "$name" "$nfail"
       NKILL=$((NKILL+1))
     fi
   fi
@@ -148,7 +183,7 @@ done < "$MUT"
 echo
 echo "========================================================"
 printf 'design : %s\n' "$RTL"
-printf 'tests  : %s  (%s checks clean)\n' "$TB" "${BASE_CHECKS:-?}"
+printf 'tests  : %s  (%s clean)\n' "$TB" "$BASE_LABEL"
 printf 'killed : %d of %d real mutations\n' "$NKILL" "$NRUN"
 [[ $NEQ    -gt 0 ]] && printf 'equiv  : %d survived as declared\n' "$NEQ"
 [[ $NSKIP  -gt 0 ]] && printf 'skipped: %d (no-op pattern or compile error)\n' "$NSKIP"

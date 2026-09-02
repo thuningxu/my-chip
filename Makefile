@@ -51,6 +51,21 @@ RDREG  ?= 0
 # cheap insurance. Also used by tb_fx2fp32.
 NRAND  ?= 20000
 
+# sim-matrix bookkeeping. Every PASS line is both printed AND appended to a tally
+# file, and the summary compares the count against NCONFIG. The previous version
+# printed "all 32 configurations PASS" from a hardcoded string; when amx_fp8's
+# sweep changed, the line kept claiming 32 while actually running 28 -- caught by
+# accident during a merge, which is not a process.
+#
+#   mac_array    3 sizes x 2 CPORT x 2 OUTPAR         12
+#   amx_tdpbssd  2 SAT x 4 PIPE                        8
+#   tpu_mmu      4 sizes x 2 RDREG                     8
+#   amx_fp8      2 RDREG x 2 ACC                       4
+#   amx_fp8      ACC=1 at FX_W 40/44/48/56             4
+#   leaves       fp32_add fp8_mul maxmag64 fx2fp32     4
+NCONFIG := 40
+TALLY    = tee -a $(BUILD)/.matrix_tally
+
 # amx_fp8 accumulator style -- the X2 experiment.
 #   ACC=0  four separately-rounded IEEE FP32 lane accumulators. The reading of
 #          Intel's patent EP4398097A2 that row p1 shipped, and the ONLY mode that
@@ -100,11 +115,12 @@ help:
 	@echo "  make sim             run the regression            (N=$(N))"
 	@echo "  make sim-amx         AMX TDPBSSD regression   (SAT=$(SAT) PIPE=$(PIPE))"
 	@echo "  make sim-tpu         TPU systolic regression  (TN=$(TN) RDREG=$(RDREG))"
-	@echo "  make sim-fp8units    FP32 adder + FP8 multiplier, the leaf arithmetic"
-	@echo "  make sim-fp8         AMX-FP8 regression, all 4 ops (RDREG=$(RDREG))"
-	@echo "  make sim-matrix      all designs, all parameter states (32 configs)"
+	@echo "  make sim-fp8units    fp32_add, fp8_mul, maxmag64, fx2fp32 -- the leaves"
+	@echo "  make sim-fp8         AMX-FP8 regression, all 4 ops (RDREG=$(RDREG) ACC=$(ACC))"
+	@echo "  make sim-matrix      all designs, all parameter states ($(NCONFIG) configs)"
 	@echo "  make sim-all         run the regression at N=4,8,16"
 	@echo "  make golden          run the Python reference model"
+	@echo "  make mutate          break the RTL on purpose; the tests must notice"
 	@echo ""
 	@echo "  make schematic       readable circuit schematics   (SN=$(SN))"
 	@echo "                       coarse cells, pre-techmap. Per-config output:"
@@ -173,32 +189,48 @@ sim-all:
 # The full parameter matrix: 3 sizes x 2 C_PORT x 2 OUT_PAR. A parameter that is
 # never built in both states is not a parameter, it is dead code with a name.
 .PHONY: sim-matrix
-sim-matrix:
+sim-matrix: $(BUILD)
+	@: > $(BUILD)/.matrix_tally
 	@$(MAKE) --no-print-directory sim-fp8units >/dev/null \
-	  && echo "  PASS  fp32_add    NRAND=$(NRAND)" \
-	  && echo "  PASS  fp8_mul     exhaustive 4x256x256" \
+	  && $(TALLY) "  PASS  fp32_add    NRAND=$(NRAND)" \
+	  && $(TALLY) "  PASS  fp8_mul     exhaustive 4x256x256" \
+	  && $(TALLY) "  PASS  maxmag64    the alignment reference" \
+	  && $(TALLY) "  PASS  fx2fp32     ACC_W=$(ACCW)" \
 	  || { echo "  FAIL  fp8 leaf arithmetic"; exit 1; }
 	@for n in 4 8 16; do for c in 0 1; do for r in 0 1; do \
 	  $(MAKE) --no-print-directory sim N=$$n CPORT=$$c OUTPAR=$$r >/dev/null \
-	    && echo "  PASS  mac_array   N=$$n CPORT=$$c OUTPAR=$$r" \
+	    && $(TALLY) "  PASS  mac_array   N=$$n CPORT=$$c OUTPAR=$$r" \
 	    || { echo "  FAIL  mac_array   N=$$n CPORT=$$c OUTPAR=$$r"; exit 1; }; \
 	done; done; done
 	@for s in 0 1; do for p in 0 1 2 3; do \
 	  $(MAKE) --no-print-directory sim-amx SAT=$$s PIPE=$$p >/dev/null \
-	    && echo "  PASS  amx_tdpbssd SAT=$$s PIPE=$$p" \
+	    && $(TALLY) "  PASS  amx_tdpbssd SAT=$$s PIPE=$$p" \
 	    || { echo "  FAIL  amx_tdpbssd SAT=$$s PIPE=$$p"; exit 1; }; \
 	done; done
 	@for n in 4 8 16 32; do for r in 0 1; do \
 	  $(MAKE) --no-print-directory sim-tpu TN=$$n RDREG=$$r >/dev/null \
-	    && echo "  PASS  tpu_mmu     N=$$n RD_REG=$$r" \
+	    && $(TALLY) "  PASS  tpu_mmu     N=$$n RD_REG=$$r" \
 	    || { echo "  FAIL  tpu_mmu     N=$$n RD_REG=$$r"; exit 1; }; \
 	done; done
-	@for r in 0 1; do \
-	  $(MAKE) --no-print-directory sim-fp8 RDREG=$$r >/dev/null \
-	    && echo "  PASS  amx_fp8     RD_REG=$$r" \
-	    || { echo "  FAIL  amx_fp8     RD_REG=$$r"; exit 1; }; \
+	@for r in 0 1; do for a in 0 1; do \
+	  $(MAKE) --no-print-directory sim-fp8 RDREG=$$r ACC=$$a >/dev/null \
+	    && $(TALLY) "  PASS  amx_fp8     RD_REG=$$r ACC=$$a" \
+	    || { echo "  FAIL  amx_fp8     RD_REG=$$r ACC=$$a"; exit 1; }; \
+	done; done
+	@for w in 40 44 48 56; do \
+	  $(MAKE) --no-print-directory sim-fp8 ACC=1 ACCW=$$w >/dev/null \
+	    && $(TALLY) "  PASS  amx_fp8     ACC=1 FX_W=$$w" \
+	    || { echo "  FAIL  amx_fp8     ACC=1 FX_W=$$w"; exit 1; }; \
 	done
-	@echo "== all 32 configurations PASS =="
+	@n=$$(wc -l < $(BUILD)/.matrix_tally | tr -d " "); \
+	  if [ "$$n" != "$(NCONFIG)" ]; then \
+	    echo "== $$n configurations PASS, but NCONFIG says $(NCONFIG) =="; \
+	    echo "   The matrix changed and the count did not. Fix NCONFIG in the"; \
+	    echo "   Makefile -- a summary line that reports a number nobody checked"; \
+	    echo "   is how 'all 32 configurations PASS' survived becoming 28."; \
+	    exit 1; \
+	  fi; \
+	  echo "== all $$n configurations PASS =="
 
 .PHONY: sim-amx
 # The AMX regression. Separate target rather than a DESIGN switch on `sim`,
@@ -246,6 +278,12 @@ sim-fp8units: $(BUILD)
 	@vvp $(BUILD)/tb_fp8_mul.vvp | tee $(BUILD)/sim_fp8_mul.log
 	@grep -q '^RESULT: PASS' $(BUILD)/sim_fp8_mul.log \
 	  || { echo "fp8_mul regression FAILED"; exit 1; }
+	@echo "== alignment-reference max tree regression =="
+	@$(IVERILOG) -g2005 -o $(BUILD)/tb_maxmag64.vvp \
+	  -Ptb_maxmag64.NRAND=$(NRAND) tb/tb_maxmag64.v rtl/maxmag64.v
+	@vvp $(BUILD)/tb_maxmag64.vvp | tee $(BUILD)/sim_maxmag64.log
+	@grep -q '^RESULT: PASS' $(BUILD)/sim_maxmag64.log \
+	  || { echo "maxmag64 regression FAILED"; exit 1; }
 	@echo "== fixed-point to FP32 converter regression (ACC_W=$(ACCW)) =="
 	@$(IVERILOG) -g2005 -o $(BUILD)/tb_fx2fp32_w$(ACCW).vvp \
 	  -Ptb_fx2fp32.ACC_W=$(ACCW) -Ptb_fx2fp32.NRAND=$(NRAND) \
@@ -259,13 +297,40 @@ sim-fp8units: $(BUILD)
 # no op= parameter here: op[1:0] is a runtime input and the testbench exercises
 # every value.
 sim-fp8: $(BUILD)
-	@echo "== AMX-FP8 regression RD_REG=$(RDREG) =="
-	@$(IVERILOG) -g2005 -o $(BUILD)/tb_amx_fp8_r$(RDREG).vvp \
-	  -Ptb_amx_fp8.RD_REG=$(RDREG) \
-	  tb/tb_amx_fp8.v rtl/amx_fp8.v rtl/fp8_mul.v rtl/fp32_add.v
-	@vvp $(BUILD)/tb_amx_fp8_r$(RDREG).vvp | tee $(BUILD)/sim_amx_fp8_r$(RDREG).log
-	@grep -q '^RESULT: PASS' $(BUILD)/sim_amx_fp8_r$(RDREG).log \
+	@echo "== AMX-FP8 regression RD_REG=$(RDREG) ACC=$(ACC) ACCW=$(ACCW) =="
+	@$(IVERILOG) -g2005 -o $(BUILD)/tb_amx_fp8_r$(RDREG)_a$(ACC)_w$(ACCW).vvp \
+	  -Ptb_amx_fp8.RD_REG=$(RDREG) -Ptb_amx_fp8.ACC=$(ACC) \
+	  -Ptb_amx_fp8.FX_W=$(ACCW) \
+	  tb/tb_amx_fp8.v rtl/amx_fp8.v rtl/fp8_mul.v rtl/fp32_add.v \
+	  rtl/fx2fp32.v rtl/maxmag64.v
+	@vvp $(BUILD)/tb_amx_fp8_r$(RDREG)_a$(ACC)_w$(ACCW).vvp \
+	  | tee $(BUILD)/sim_amx_fp8_r$(RDREG)_a$(ACC)_w$(ACCW).log
+	@grep -q '^RESULT: PASS' $(BUILD)/sim_amx_fp8_r$(RDREG)_a$(ACC)_w$(ACCW).log \
 	  || { echo "AMX-FP8 regression FAILED"; exit 1; }
+
+.PHONY: mutate
+# BREAK THE RTL ON PURPOSE and check the testbenches notice. A testbench that
+# reports 140,962 passing checks proves nothing on its own -- one that compares a
+# design against a restatement of itself passes just as many. The only evidence a
+# testbench works is that it FAILS when the design is wrong.
+#
+# Mutations declared with a `=` prefix are EXPECTED to survive because they are
+# provably equivalent; the proof is written next to each one. A `=` mutation that
+# gets KILLED also fails the suite -- a wrong equivalence claim is a more
+# interesting result than a missing test.
+#
+# ACC=1 runs at FX_W=44, NOT the shipping 52: at 52 the accumulator has over a
+# binade of slack and "reference off by one binade" survives, so a suite run there
+# has no teeth on the reference or the alignment. See tb/mut/amx_fp8_acc1.mut.
+mutate:
+	@scripts/mutate.sh -r rtl/fx2fp32.v -t tb/tb_fx2fp32.v -m tb/mut/fx2fp32.mut
+	@scripts/mutate.sh -r rtl/maxmag64.v -t tb/tb_maxmag64.v -m tb/mut/maxmag64.mut
+	@scripts/mutate.sh -r rtl/amx_fp8.v -t tb/tb_amx_fp8.v \
+	  -m tb/mut/amx_fp8_acc0.mut -P "-Ptb_amx_fp8.ACC=0" \
+	  -x rtl/fp8_mul.v -x rtl/fp32_add.v -x rtl/fx2fp32.v -x rtl/maxmag64.v
+	@scripts/mutate.sh -r rtl/amx_fp8.v -t tb/tb_amx_fp8.v \
+	  -m tb/mut/amx_fp8_acc1.mut -P "-Ptb_amx_fp8.ACC=1 -Ptb_amx_fp8.FX_W=44" \
+	  -x rtl/fp8_mul.v -x rtl/fp32_add.v -x rtl/fx2fp32.v -x rtl/maxmag64.v
 
 .PHONY: golden
 golden:

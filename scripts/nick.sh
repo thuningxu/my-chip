@@ -53,16 +53,45 @@ nick_tpu() {
     printf 'tpu_n%s%s' "${1:-32}" "${2:+_$2}"
 }
 
-# amx_fp8: there is nothing to put in the name. The tile geometry is fixed by the
-# instruction (16x64 fp8, 16x16 fp32) and the four variants are a RUNTIME input,
-# not a build parameter -- one netlist executes all of TDPBF8PS, TDPBHF8PS,
-# TDPHBF8PS and TDPHF8PS, which is the whole point of a unified design. RD_REG is
-# omitted for the same reason it is omitted from nick_tpu: it adds one register
-# and no geometry, so forking every artifact directory over it would be noise.
+# amx_fp8: the tile geometry is fixed by the instruction (16x64 fp8, 16x16 fp32)
+# and the four variants are a RUNTIME input, not a build parameter -- one netlist
+# executes all of TDPBF8PS, TDPBHF8PS, TDPHBF8PS and TDPHF8PS, which is the whole
+# point of a unified design. RD_REG is omitted for the same reason it is omitted
+# from nick_tpu: it adds one register and no geometry, so forking every artifact
+# directory over it would be noise.
+#
+# ACC and FX_W are DIFFERENT: ACC selects between two entirely different
+# accumulators, and FX_W changes the width of 256 of them. Two builds that differ
+# in either are different hardware with different cell counts, so they must not
+# share an artifact directory -- that is exactly the collision this file was
+# written to prevent (see the header on C_PORT).
+#
+# ACC=0 emits the BARE name `fp8`, with no suffix, so the p1 artifacts already on
+# disk keep resolving. Same reasoning as OUT_PAR's explicit zero test above: p1
+# backs a published EXPERIMENTS.md row and renaming its directory would orphan
+# that provenance. FX_W appears only when ACC=1, because it has no meaning
+# otherwise -- an `fp8_a0_w52` would imply a width that does not exist in that
+# build.
+#
 # Distinct `fp8_` prefix keeps these clear of my_chip_*, amx_* and tpu_*.
-#   nick_fp8 [TAG]
+#   nick_fp8 <ACC> <FX_W> [TAG]
 nick_fp8() {
-    printf 'fp8%s' "${1:+_$1}"
+    local acc="${1:-0}" w="${2:-52}" tag="${3:-}"
+    # The signature GAINED two leading arguments when ACC arrived, and every
+    # existing caller passed TAG first. A stale caller would therefore hand a tag
+    # string in as ACC and get a plausible-looking wrong directory -- the precise
+    # failure this file exists to prevent. So reject anything that is not a number
+    # rather than build a name out of it.
+    if [[ ! "$acc" =~ ^[0-9]+$ || ! "$w" =~ ^[0-9]+$ ]]; then
+        echo "FATAL: nick_fp8 takes <ACC> <FX_W> [TAG], got ACC='$acc' FX_W='$w'." >&2
+        echo "       A caller is still using the old nick_fp8 <TAG> signature." >&2
+        return 2
+    fi
+    if [[ "$acc" == "0" ]]; then
+        printf 'fp8%s' "${tag:+_$tag}"
+    else
+        printf 'fp8_a%s_w%s%s' "$acc" "$w" "${tag:+_$tag}"
+    fi
 }
 
 # List the nicknames that actually exist, for error messages. A "missing

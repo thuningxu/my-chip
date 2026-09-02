@@ -11,7 +11,7 @@
 # Usage:
 #   scripts/measure.sh [-d DESIGN] [-n N] [-c C_PORT] [-r OUT_PAR] [-s SAT]
 #                      [-p PERIOD_NS] [-u UTIL] [-t TAG] [--hold-margin NS]
-#                      [--no-sim]
+#                      [-A ACC] [-W FX_W] [--no-sim]
 #
 # Env:
 #   ORFS        path to OpenROAD-flow-scripts   (default: ~/sd/OpenROAD-flow-scripts)
@@ -33,6 +33,10 @@ RDREG=0
 # tpu_mmu array dimension. Named TN, not N: N is already mac_array's size and
 # silently reusing it would let `-n 4` build a 16-MAC systolic array by accident.
 TN=32
+# amx_fp8 accumulator style and fixed-point width -- the X2 experiment. ACC=0 is
+# the conformant arm row p1 shipped; ACC=1 is the deviation. See rtl/amx_fp8.v.
+ACC=0
+FXW=52
 PERIOD=1.00
 UTIL=40
 TAG=""
@@ -51,6 +55,8 @@ while [[ $# -gt 0 ]]; do
     -P) PIPE="$2"; shift 2 ;;
     -R) RDREG="$2"; shift 2 ;;
     -T) TN="$2"; shift 2 ;;
+    -A) ACC="$2"; shift 2 ;;
+    -W) FXW="$2"; shift 2 ;;
     -p) PERIOD="$2"; shift 2 ;;
     -u) UTIL="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
@@ -100,24 +106,43 @@ case "$DESIGN" in
     CFG_DESC="N=$TN RD_REG=$RDREG"
     ;;
   amx_fp8)
-    NICK="$(nick_fp8 "$TAG")"
-    # Three files. RTL_LIST is expanded UNQUOTED both into the iverilog gate
-    # below and into @VERILOG_FILES@, so a space-separated list needs no
-    # plumbing change. fp32_add and fp8_mul are separate modules because each is
-    # instantiated ~1000 times and each has its own exhaustive testbench.
+    NICK="$(nick_fp8 "$ACC" "$FXW" "$TAG")"
+    # RTL_LIST is expanded UNQUOTED both into the iverilog gate below and into
+    # @VERILOG_FILES@, so a space-separated list needs no plumbing change. Each
+    # leaf is a separate module because each is instantiated hundreds of times and
+    # each has its own testbench.
+    #
+    # ALL FIVE FILES ARE LISTED FOR BOTH ARMS, and that is safe rather than sloppy:
+    # yosys's `hierarchy -top amx_fp8` prunes whatever the chosen arm does not
+    # instantiate, so ACC=0 never pays for fx2fp32/maxmag64 and ACC=1 never pays
+    # for fp8_mul. The prune is CHECKED after synthesis rather than assumed -- see
+    # the arm-purity gate below.
     RTL_LIST="$HERE/rtl/amx_fp8.v $HERE/rtl/fp8_mul.v $HERE/rtl/fp32_add.v"
+    RTL_LIST="$RTL_LIST $HERE/rtl/fx2fp32.v $HERE/rtl/maxmag64.v"
     TB_FILE="$HERE/tb/tb_amx_fp8.v"
-    # The four instructions are a RUNTIME input (op[1:0]), not a build
-    # parameter, so RD_REG is the only thing to configure.
-    TOP_PARAMS="RD_REG $RDREG"
-    SIM_PARAMS=(-Ptb_amx_fp8.RD_REG="$RDREG")
-    CFG_DESC="RD_REG=$RDREG"
-    # See config.mk.in: `share` cannot help a design whose 1024 adders all run
-    # every cycle, and it does not terminate in reasonable time on this one.
+    # The four instructions are a RUNTIME input (op[1:0]), not a build parameter.
+    TOP_PARAMS="RD_REG $RDREG ACC $ACC FX_W $FXW"
+    SIM_PARAMS=(-Ptb_amx_fp8.RD_REG="$RDREG"
+                -Ptb_amx_fp8.ACC="$ACC"
+                -Ptb_amx_fp8.FX_W="$FXW")
+    if [[ "$ACC" == "0" ]]; then
+      CFG_DESC="RD_REG=$RDREG ACC=0"
+    else
+      CFG_DESC="RD_REG=$RDREG ACC=1 FX_W=$FXW"
+    fi
+    # See config.mk.in: `share` cannot help a design whose adders all run every
+    # cycle, and it does not terminate in reasonable time on this one.
     SYNTH_ARGS="-noshare"
-    # 1024 instances of ONE adder: map it once. See config.mk.in for the numbers.
+    # Hundreds of instances of ONE leaf: map it once. See config.mk.in.
     SYNTH_HIER=1
-    SYNTH_KEEP="fp32_add fp8_mul"
+    # Keep only what the chosen arm actually instantiates. keep_hierarchy on an
+    # uninstantiated module is a no-op, but naming the wrong set would hide a
+    # wrong-arm build behind a plausible cell count.
+    if [[ "$ACC" == "0" ]]; then
+      SYNTH_KEEP="fp32_add fp8_mul"
+    else
+      SYNTH_KEEP="fp32_add fx2fp32 maxmag64"
+    fi
     ;;
   *)
     echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd, tpu_mmu, amx_fp8" >&2
@@ -280,6 +305,42 @@ if [[ $FLOW_RC -ne 0 ]]; then
     echo "FLOW FAILED (rc=$FLOW_RC). Tail of $LOG:" >&2
     tail -15 "$LOG" >&2
     exit 1
+  fi
+fi
+
+# --------------------------------------------- 3b. ARM PURITY (amx_fp8 only)
+# All five RTL files are handed to yosys for both ACC arms, on the argument that
+# `hierarchy -top amx_fp8` prunes whatever the chosen arm does not instantiate.
+# That argument is CHECKED here rather than trusted. If it were wrong, an ACC=1
+# row would silently include 1024 pruned-but-present fp8_mul instances -- an area
+# number inflated by the arm that was supposed to have been removed, which is
+# exactly the kind of plausible-looking wrong number this repo exists not to ship.
+#
+# Reads the synthesised netlist, which is stage-final and therefore admissible;
+# never a running report.
+if [[ "$DESIGN" == "amx_fp8" ]]; then
+  SYNV="$WORK/results/nangate45/$NICK/base/1_synth.v"
+  if [[ -s "$SYNV" ]]; then
+    if [[ "$ACC" == "0" ]]; then WANT="fp8_mul";  UNWANT="fx2fp32"
+    else                        WANT="fx2fp32";  UNWANT="fp8_mul"
+    fi
+    n_want=$(grep -cE "^ *\\\\?${WANT} " "$SYNV" || true)
+    n_unwant=$(grep -cE "^ *\\\\?${UNWANT} " "$SYNV" || true)
+    if [[ "$n_want" -eq 0 ]]; then
+      echo "FATAL: ACC=$ACC but the netlist contains NO $WANT instances." >&2
+      echo "       The wrong accumulator arm was built, or keep_hierarchy did not" >&2
+      echo "       apply. Refusing to report PPA for an unidentified design." >&2
+      exit 1
+    fi
+    if [[ "$n_unwant" -ne 0 ]]; then
+      echo "FATAL: ACC=$ACC but the netlist still contains $n_unwant $UNWANT" >&2
+      echo "       instances. hierarchy -top did NOT prune the unused arm, so this" >&2
+      echo "       area number includes hardware the arm does not use." >&2
+      exit 1
+    fi
+    echo "   arm purity: $n_want $WANT instances, 0 $UNWANT (ACC=$ACC)"
+  else
+    echo "   WARNING: no 1_synth.v at $SYNV -- arm purity NOT verified" >&2
   fi
 fi
 

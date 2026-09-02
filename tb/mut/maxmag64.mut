@@ -1,0 +1,30 @@
+# Mutations for rtl/maxmag64.v -- run with:
+#   scripts/mutate.sh -r rtl/maxmag64.v -t tb/tb_maxmag64.v -m tb/mut/maxmag64.mut
+
+# The sign bit must NOT be part of the key. Including it makes the reference track
+# the sign pattern instead of the magnitude range.
+sign bit included in the key ||| s/assign l0\[i\*7 \+: 7\] = bytes\[i\*8 \+: 7\];/assign l0[i*7 +: 7] = bytes[i*8+1 +: 7];/
+low 7 bits instead of high   ||| s/assign l0\[i\*7 \+: 7\] = bytes\[i\*8 \+: 7\];/assign l0[i*7 +: 7] = {1'b0, bytes[i*8 +: 6]};/
+
+# min instead of max, at each level. A tree where one level is inverted is the
+# classic copy-paste bug in exactly this shape of code.
+level 1 takes the min        ||| s/assign l1\[i\*7 \+: 7\] = \(l0\[\(2\*i\)\*7 \+: 7\] > l0\[\(2\*i\+1\)\*7 \+: 7\]\)/assign l1[i*7 +: 7] = (l0[(2*i)*7 +: 7] < l0[(2*i+1)*7 +: 7])/
+level 3 takes the min        ||| s/assign l3\[i\*7 \+: 7\] = \(l2\[\(2\*i\)\*7 \+: 7\] > l2\[\(2\*i\+1\)\*7 \+: 7\]\)/assign l3[i*7 +: 7] = (l2[(2*i)*7 +: 7] < l2[(2*i+1)*7 +: 7])/
+final level takes the min    ||| s/assign mx = \(l5\[0 \+: 7\] > l5\[7 \+: 7\]\) \? l5\[0 \+: 7\] : l5\[7 \+: 7\];/assign mx = (l5[0 +: 7] > l5[7 +: 7]) ? l5[7 +: 7] : l5[0 +: 7];/
+
+# Dropping half the tree at some level -- the failure mode where a whole group of
+# input positions can never win, which phase 1 exists to catch.
+level 2 ignores odd inputs   ||| s/assign l2\[i\*7 \+: 7\] = \(l1\[\(2\*i\)\*7 \+: 7\] > l1\[\(2\*i\+1\)\*7 \+: 7\]\)\n *\?  l1\[\(2\*i\)\*7 \+: 7\] :   l1\[\(2\*i\+1\)\*7 \+: 7\];/assign l2[i*7 +: 7] = l1[(2*i)*7 +: 7];/
+level 4 ignores even inputs  ||| s/assign l4\[i\*7 \+: 7\] = \(l3\[\(2\*i\)\*7 \+: 7\] > l3\[\(2\*i\+1\)\*7 \+: 7\]\)\n *\?  l3\[\(2\*i\)\*7 \+: 7\] :   l3\[\(2\*i\+1\)\*7 \+: 7\];/assign l4[i*7 +: 7] = l3[(2*i+1)*7 +: 7];/
+final level ignores l5[1]    ||| s/assign mx = \(l5\[0 \+: 7\] > l5\[7 \+: 7\]\) \? l5\[0 \+: 7\] : l5\[7 \+: 7\];/assign mx = l5[0 +: 7];/
+
+# Pairing the wrong operands: a shape that still reduces 64 to 1 but visits some
+# inputs twice and others never.
+level 1 pairs i with i+1     ||| s/assign l1\[i\*7 \+: 7\] = \(l0\[\(2\*i\)\*7 \+: 7\] > l0\[\(2\*i\+1\)\*7 \+: 7\]\)\n *\?  l0\[\(2\*i\)\*7 \+: 7\] :   l0\[\(2\*i\+1\)\*7 \+: 7\];/assign l1[i*7 +: 7] = (l0[i*7 +: 7] > l0[(i+1)*7 +: 7]) ? l0[i*7 +: 7] : l0[(i+1)*7 +: 7];/
+
+# Strict vs non-strict comparison. Ties are everywhere in real tiles (uniform
+# rows), so if this were observable the phase 2 tie sweeps would catch it -- and it
+# is NOT observable, because on a tie the two operands are equal and either branch
+# returns the same value. Declared rather than deleted: it is the kind of change a
+# reader might "fix" one way or the other.
+=strict compare becomes >=   ||| s/\(l0\[\(2\*i\)\*7 \+: 7\] > l0\[\(2\*i\+1\)\*7 \+: 7\]\)/(l0[(2*i)*7 +: 7] >= l0[(2*i+1)*7 +: 7])/

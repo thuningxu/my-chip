@@ -60,6 +60,11 @@ ORFS="${ORFS:-$HOME/sd/OpenROAD-flow-scripts}"
 
 NICK=""; DESIGN=amx_tdpbssd; SAT=1; TAG=""; N=4; CPORT=1; OUTPAR=0
 TN=32; RDREG=0   # tpu_mmu: array dimension, readback register
+# amx_fp8 accumulator arm and fixed-point width. Must match what measure.sh
+# built, or this reads a DIFFERENT design's directory -- see scripts/nick.sh.
+ACC=0
+FXW=52
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -N) NICK="$2"; shift 2 ;;
@@ -67,6 +72,8 @@ while [[ $# -gt 0 ]]; do
     -s) SAT="$2"; shift 2 ;;
     -t) TAG="$2"; shift 2 ;;
     -T) TN="$2"; shift 2 ;;
+    -A) ACC="$2"; shift 2 ;;
+    -W) FXW="$2"; shift 2 ;;
     -n) N="$2"; shift 2 ;;
     -c) CPORT="$2"; shift 2 ;;
     -r) OUTPAR="$2"; shift 2 ;;
@@ -81,7 +88,7 @@ if [[ -z "$NICK" ]]; then
     mac_array)   NICK="$(nick "$N" "$CPORT" "$TAG" "$OUTPAR")" ;;
     amx_tdpbssd) NICK="$(nick_amx "$SAT" "$TAG")" ;;
     tpu_mmu)     NICK="$(nick_tpu "$TN" "$TAG")" ;;
-    amx_fp8)     NICK="$(nick_fp8 "$TAG")" ;;
+    amx_fp8)     NICK="$(nick_fp8 "$ACC" "$FXW" "$TAG")" ;;
     *) echo "FATAL: unknown design '$DESIGN'" >&2; exit 2 ;;
   esac
 fi

@@ -245,3 +245,104 @@ Revised flop prediction for **Y1** (`ACC=1 ACC_W=52`): tiles 24,576 + accumulato
 evidence about the reasoning. It was caught because declaring the generation first
 forced the width to be written down and therefore checked — before any RTL existed
 and before a route was spent on it.*
+
+### THREE DEVIATIONS from X2 as declared, appended when the RTL was written
+
+All three were found while implementing, all three are departures from the plan
+above, and the plan is left standing so the difference is visible.
+
+**1. The reference is computed at `start` from the stored tiles, not maintained on
+tile writes.** The declaration said "updated **on tile write**", with `maxmagB` as
+"a running max across B writes". That design is wrong in a way that no test in the
+current suite would have caught: a running max is **stale when a tile is reloaded
+with smaller values**, and it makes the answer depend on the order rows were
+written. It also puts a 6-level comparator tree on an input-port path, where STA has
+no launching flop to offset. Computing the max on the start edge from `a_flat` and
+`b_flat` is reg-to-reg, order-independent, and costs 32 instances of `maxmag64`
+(63 comparators each). The plan's mutation "maxmagB not accumulating across B
+writes" therefore no longer describes anything; its replacement is **"B column
+gathers the wrong bytes"**, three mutations attacking the same thing — which 64
+bytes of a VNNI-interleaved tile make up one logical B column.
+
+**2. The parameter is `FX_W`, not `ACC_W`.** `amx_fp8` already had
+`localparam ACC_W = 32`, the FP32 dword width used by C, by the products and by
+ACC=0's lane accumulators. Reusing the name would have meant renaming ~40 lines of
+shipped, verified RTL to introduce a parameter. `fx2fp32`'s own parameter stays
+`ACC_W` and is fed from `FX_W` at the instantiation.
+
+**3. ACC=1 is 19 cycles, not 20.** Its epilogue needs two cycles (convert, then
+`+= C`) where ACC=0 needs three. This was not anticipated in the declaration and it
+**invalidates one claim carried over from p1**: the head-to-head against
+`amx_tdpbssd` was built on "identical MACs, identical cycles, identical operand
+delivery", and the identical-cycles half does not hold for ACC=1. Any Y1 throughput
+number must divide by 19, not 20, and must say so. `tb_amx_fp8.v` pins the count per
+arm rather than accepting either.
+
+### Flop count: predicted, refined, then measured
+
+| | flops |
+|---|---|
+| declared prediction (`ACC=1 ACC_W=48`) | 38,379 |
+| revised for `ACC_W=52` | 39,403 |
+| refined during implementation | **39,371** |
+| **measured** (yosys, `hierarchy -chparam` + `proc`) | **39,371** |
+
+The −32 is `maxmag` stored as a **6-bit unbiased exponent** rather than the 7-bit raw
+byte the prediction assumed — the bias is subtracted once per row/column at `start`,
+on the single winner, instead of at every use. Composition, all nine terms checked
+against the tool: tiles 24,576 + accumulators 13,312 + `maxe_a`/`maxe_b` 192 +
+special flags 768 + `rd_data` 512 + control 11.
+
+**And ACC=0 measures 57,867 — p1's number exactly.** That is the inviolable
+condition confirmed on register count as well as on golden constants: the
+parameterisation moved the p1 datapath into a generate arm and moved the `cacc` flop
+block out of it, and neither changed a single register.
+
+### The shipping width has ≥1 binade of margin, measured by mutation
+
+The mutation "reference off by one binade" — which makes every term align one bit
+lower — **survives at `FX_W` 52 and 56, and is killed at 48, 44 and 40.** That is a
+measurement, not a hole: at 52 there is enough slack that all 256 elements still
+round to the same FP32 even after throwing away a bit. It corroborates the width
+sweep from the other direction, where 48 was 29× better than ACC=0 but not exact and
+52 matched the exact rational sum on 100% of trials.
+
+Consequence for method: **the ACC=1 mutation suite runs at `FX_W=44`, not at the
+shipping 52.** A suite run at a width with slack has no teeth on the reference or the
+alignment. The shipping width is still simulated at every gate; it is only the
+mutation runs that use the tight width.
+
+### Two real test holes, found by mutation and closed
+
+`tb_amx_fp8.v` had 28 cases and passed all of them, and two mutations of the special
+handling **survived the entire suite**:
+
+- `epi` dropping the `saw_pinf & saw_ninf` term — nothing produced two infinities of
+  **opposite sign** in one output element, so `(+Inf) + (−Inf) = NaN` was untested.
+- `l_pinf = l_inf & ~asg` instead of `& ~lsgn` — nothing produced an Inf whose
+  product **sign came from B**.
+
+Both are ISA semantics, not corner-hunting. Cases **S5** (`+Inf` at k=0 and `−Inf` at
+k=1 must give NaN) and **S6** (`−Inf × −1` must give `+Inf`) were added, verified
+against `fp8_golden.py` independently, and both mutations now die on them. ACC=0
+happened to be correct here through `fp32_add`'s own Inf handling; ACC=1 tracks the
+flags explicitly, which is what exposed the gap.
+
+*Neither hole was found by reading the code or by adding cases that felt missing.
+Both were found by breaking the design on purpose and noticing the tests did not
+care — which is the only evidence a testbench works.*
+
+### Verification state before either route is run
+
+| | |
+|---|---|
+| `tb_fx2fp32` | 140,962 checks, 0 errors; 29 of 31 mutations killed, 2 declared equivalent with proofs |
+| `tb_maxmag64` | 40,347 checks, 0 errors; 9 of 10 mutations killed, 1 declared equivalent |
+| `tb_amx_fp8` ACC=0 | 30/30 cases, 4 golden constants byte-identical to p1 |
+| `tb_amx_fp8` ACC=1 | 30/30 cases at `FX_W` 40/44/48/52/56; 16 golden constants, **every one at a position where the two arms disagree** |
+| cross-language tie | `fx2fp32` vs `fp8_golden.py`'s `fx_to_fp32` and `frac_to_fp32`, 6,000 vectors, three-way agreement |
+
+The 16 ACC=1 golden constants are all at disagreeing positions **because the first
+attempt was not**: T3b and T3d originally checked four positions that happen to be
+bit-identical between the arms, so the golden set could not tell an ACC=1 build from
+an ACC=0 one. A golden constant both arms satisfy is decoration, not a cross-check.

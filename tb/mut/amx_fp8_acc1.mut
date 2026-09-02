@@ -1,0 +1,100 @@
+# Mutations for the ACC=1 arm of rtl/amx_fp8.v. Run with:
+#   scripts/mutate.sh -r rtl/amx_fp8.v -t tb/tb_amx_fp8.v -m tb/mut/amx_fp8_acc1.mut \
+#       -P "-Ptb_amx_fp8.ACC=1 -Ptb_amx_fp8.FX_W=44" \
+#       -x rtl/fp8_mul.v -x rtl/fp32_add.v -x rtl/fx2fp32.v -x rtl/maxmag64.v
+#
+#=============================================================== WHY FX_W=44
+# NOT 52, which is what ships. Run at 52, the mutation "reference off by one
+# binade" SURVIVES -- and that is a real measurement rather than a hole in the
+# tests. Widening the reference by one binade shifts every term one bit further
+# right, costing one bit of precision, and at FX_W=52 there is enough slack that
+# all 256 elements still round to the same FP32. Measured directly:
+#
+#   FX_W    ref+1 binade
+#   40      KILLED
+#   44      KILLED
+#   48      KILLED
+#   52      SURVIVES     <- the shipping width has >= 1 binade of margin
+#   56      SURVIVES
+#
+# That is consistent with the Python width sweep, where 48 is 29x better than
+# ACC=0 but not exact and 52 matches the exact rational sum on 100% of trials: the
+# margin at 52 is real, and it is what makes the design robust rather than
+# marginal. But a mutation suite run at a width with slack has no teeth on the
+# reference or the alignment, so the suite runs at 44 -- the tightest width that
+# still passes clean -- and the margin at 52 is recorded here as a finding.
+#
+# Six of these are named in the X2 plan as the mutations that must fail. The
+# seventh the plan asked for -- "maxmagB not accumulating across B writes" -- no
+# longer exists, because the reference is computed at `start` from the stored tiles
+# rather than maintained incrementally. Its replacement is "B column gathers the
+# wrong bytes", which attacks the same thing the running max would have got wrong:
+# which 64 bytes make up a logical B column.
+
+#--------------------------------------------------------------- the reference
+reference off by one binade    ||| s/                    \+ 8.sd1;/                    + 8'sd2;/
+reference missing the +1       ||| s/                    \+ 8.sd1;/                    + 8'sd0;/
+reference swaps the two axes   ||| s/\$signed\(\{\{2\{maxe_a\[gm\*6\+5\]\}\}, maxe_a\[gm\*6 \+: 6\]\}\)\n                    \+ \$signed\(\{\{2\{maxe_b\[gn\*6\+5\]\}\}, maxe_b\[gn\*6 \+: 6\]\}\)/\$signed({{2{maxe_a[gn*6+5]}}, maxe_a[gn*6 +: 6]})\n                    + \$signed({{2{maxe_b[gm*6+5]}}, maxe_b[gm*6 +: 6]})/
+low off by one                 ||| s/wire signed \[9:0\] lowe = \$signed\(\{\{2\{refe\[7\]\}\}, refe\}\)\n                                       - \$signed\(LOW_SUB\);/wire signed [9:0] lowe = \$signed({{2{refe[7]}}, refe})\n                                       - \$signed(LOW_SUB) + 10'sd1;/
+A row decoded with B's format  ||| s/if \(lane_clr\) maxe_a\[gm\*6 \+: 6\] <= mag_exp\(mxa\[gm\*7 \+: 7\], op\[1\]\);/if (lane_clr) maxe_a[gm*6 +: 6] <= mag_exp(mxa[gm*7 +: 7], op[0]);/
+reference latched from op_r    ||| s/if \(lane_clr\) maxe_a\[gm\*6 \+: 6\] <= mag_exp\(mxa\[gm\*7 \+: 7\], op\[1\]\);/if (lane_clr) maxe_a[gm*6 +: 6] <= mag_exp(mxa[gm*7 +: 7], op_r[1]);/
+E5M2 bias 16 not 15           ||| s/: \(\$signed\(\{1.b0,  mag\[6:2\]\}\) - \$signed\(6.d15\)\);/: (\$signed({1'b0,  mag[6:2]}) - \$signed(6'd16));/
+
+#------------------------------------------------------ the B column gather
+# Which 64 bytes are a logical B column. The physical tile is VNNI-interleaved, so
+# this is the one place the reference has to undo the layout, and getting it wrong
+# gives a plausible-looking reference computed over the wrong bytes.
+B column gathers dword gn+1    ||| s/b_flat\[gk\*512 \+ gn\*32 \+ gb\*8 \+: 8\];/b_flat[gk*512 + ((gn+1)%16)*32 + gb*8 +: 8];/
+B column ignores the lane      ||| s/b_flat\[gk\*512 \+ gn\*32 \+ gb\*8 \+: 8\];/b_flat[gk*512 + gn*32 +: 8];/
+B column transposes k and lane ||| s/b_flat\[gk\*512 \+ gn\*32 \+ gb\*8 \+: 8\];/b_flat[gb*512 + gn*32 + gk*8 +: 8];/
+
+#--------------------------------------------------------------- the alignment
+align shifts the wrong way     ||| s/wire \[PW-1:0\] shf = \$signed\(pre\) >>> dsh\[5:0\];/wire [PW-1:0] shf = pre << dsh[5:0];/
+LOGICAL shift, so no floor     ||| s/wire \[PW-1:0\] shf = \$signed\(pre\) >>> dsh\[5:0\];/wire [PW-1:0] shf = pre >> dsh[5:0];/
+d missing the -1               ||| s/wire signed \[7:0\] dsh = refe - 8.sd1 - eab;/wire signed [7:0] dsh = refe - eab;/
+d off by one the other way     ||| s/wire signed \[7:0\] dsh = refe - 8.sd1 - eab;/wire signed [7:0] dsh = refe - 8'sd2 - eab;/
+pre-shift off by one           ||| s/<< \(FX_W-15\);/<< (FX_W-16);/
+exponent sum drops B           ||| s/wire signed \[7:0\] eab = \$signed\(\{\{2\{aex\[5\]\}\}, aex\}\)\n                                          \+ \$signed\(\{\{2\{bex\[5\]\}\}, bex\}\);/wire signed [7:0] eab = \$signed({{2{aex[5]}}, aex});/
+product sign ignored           ||| s/                        : lsgn \? -\$signed\(\{1.b0, prod8\}\)/                        : lsgn ?  \$signed({1'b0, prod8})/
+term not sign-extended         ||| s/                               \{\{\(FX_W-PW\)\{shf\[PW-1\]\}\}, shf\};/                               {{(FX_W-PW){1'b0}}, shf};/
+
+#-------------------------------------------------------- zero and special gating
+# fp8_dec hands a DAZ zero sig4 = {1,mm,0}, which is NOT zero, so dropping the zero
+# gate injects a small bogus term into every accumulation.
+zero operands not gated        ||| s/wire skip = l_nan\[gb\] \| l_inf \| azr \| bzr;/wire skip = l_nan[gb] | l_inf;/
+A zero not gated               ||| s/wire skip = l_nan\[gb\] \| l_inf \| azr \| bzr;/wire skip = l_nan[gb] | l_inf | bzr;/
+Inf times zero is Inf not NaN  ||| s/assign l_nan\[gb\]  = ana \| bna \| \(ain & bzr\) \| \(bin & azr\);/assign l_nan[gb]  = ana | bna;/
+specials do not override       ||| s/wire \[31:0\] epi = \(saw_nan \| \(saw_pinf & saw_ninf\)\) \? QNAN32/wire [31:0] epi = 1'b0 ? QNAN32/
+both infinities give +Inf      ||| s/wire \[31:0\] epi = \(saw_nan \| \(saw_pinf & saw_ninf\)\) \? QNAN32/wire [31:0] epi = (saw_nan) ? QNAN32/
+Inf sign taken from A only     ||| s/                    assign l_pinf\[gb\] = l_inf & ~lsgn;/                    assign l_pinf[gb] = l_inf \& ~asg;/
+special flags never set        ||| s/else if \(acc_phase\) saw_nan  <= saw_nan  \| \(\|l_nan\);/else if (acc_phase) saw_nan  <= saw_nan;/
+special flags not cleared      ||| s/                    if \(lane_clr\)       saw_nan  <= 1.b0;/                    if (1'b0)           saw_nan  <= 1'b0;/
+
+# The two mutations below SURVIVED the first run of this suite. That was a real
+# hole: nothing in tb_amx_fp8.v produced two infinities of OPPOSITE sign in one
+# element, and nothing produced an Inf whose product sign came from B. Cases S5
+# and S6 were added for exactly that, and both mutations are now killed by them.
+# Left in place, unmarked, because they are the entries that earned their keep.
+
+#--------------------------------------------------------------- the CSA tree
+CSA level 1 drops its carry    ||| s/wire \[FX_W-1:0\] s2 = s1 \^ c1 \^ t3;/wire [FX_W-1:0] s2 = s1 ^ t3;/
+CSA level 2 drops its carry    ||| s/wire \[FX_W-1:0\] s3 = s2 \^ c2 \^ acc;/wire [FX_W-1:0] s3 = s2 ^ acc;/
+CSA carry not shifted left     ||| s/wire \[FX_W-1:0\] c1 = \{j1\[FX_W-2:0\], 1.b0\};/wire [FX_W-1:0] c1 = j1;/
+CSA majority becomes AND       ||| s/wire \[FX_W-1:0\] j2 = \(s1 & c1\) \| \(c1 & t3\) \| \(s1 & t3\);/wire [FX_W-1:0] j2 = s1 \& c1 \& t3;/
+final carry-propagate dropped  ||| s/wire \[FX_W-1:0\] acc_next = s3 \+ c3;/wire [FX_W-1:0] acc_next = s3;/
+lane 3 never accumulated       ||| s/wire \[FX_W-1:0\] t3 = term\[3\*FX_W \+: FX_W\];/wire [FX_W-1:0] t3 = {FX_W{1'b0}};/
+lane 1 and 2 swapped in tree   ||| s/wire \[FX_W-1:0\] s1 = t0 \^ t1 \^ t2;/wire [FX_W-1:0] s1 = t0 ^ t1 ^ t1;/
+
+#--------------------------------------------------------------- the epilogue
+accumulator not cleared        ||| s/                    if \(lane_clr\)       acc <= \{FX_W\{1.b0\}\};/                    if (1'b0)           acc <= {FX_W{1'b0}};/
+C gets the raw accumulator     ||| s/                    .a \(acc\[31:0\]\),/                    .a (acc[FX_W-1:FX_W-32]),/
+conversion skipped             ||| s/                    else if \(ep_cvt\)    acc <= \{\{\(FX_W-32\)\{1.b0\}\}, epi\};/                    else if (1'b0)      acc <= {{(FX_W-32){1'b0}}, epi};/
+fx2fp32 given the wrong low    ||| s/                    .low \(lowe\),/                    .low (lowe + 10'sd1),/
+epilogue one cycle early       ||| s/assign c_wr   = ep_adc;/assign c_wr   = ep_cvt;/
+accumulate runs one cycle long ||| s/    localparam integer LASTC = \(ACC == 0\) \? EP2 : EP1;/    localparam integer LASTC = (ACC == 0) ? EP2 : EP2;/
+
+#---------------------------------------------------------- proven equivalent
+# fp32_add is commutative -- tb_fp32_add asserts it on every one of its 121k
+# vectors -- so swapping the += C operands cannot be observed. Kept as an entry so
+# a reader knows the order was chosen to match the model, not because it matters.
+=C add operands swapped        ||| s/                    .a \(acc\[31:0\]\),\n                    .b \(cacc\[gm\]\[gn\]\),/                    .a (cacc[gm][gn]),\n                    .b (acc[31:0]),/

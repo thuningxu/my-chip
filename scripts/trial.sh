@@ -33,6 +33,8 @@ LOG_JSONL="$HERE/experiments/trials.jsonl"
 X=""; Y=""; GOAL=""
 DESIGN=amx_tdpbssd
 SAT=1; PIPE=0; RDREG=0; PERIOD=2.80; UTIL=40; HOLD_MARGIN=""
+# amx_fp8 only: which accumulator arm, and the fixed-point width.
+ACC=0; FXW=52
 # A written-down prediction the trial will CHECK, not merely sit next to. The
 # first X1-Y1 attempt was a duplicate of its own baseline for 17 minutes because
 # the flop count was logged and never compared to what the change had to add.
@@ -49,6 +51,8 @@ while [[ $# -gt 0 ]]; do
     -s) SAT="$2"; shift 2 ;;
     -P) PIPE="$2"; shift 2 ;;
     -R) RDREG="$2"; shift 2 ;;
+    -A) ACC="$2"; shift 2 ;;
+    -W) FXW="$2"; shift 2 ;;
     -p) PERIOD="$2"; shift 2 ;;
     -u) UTIL="$2"; shift 2 ;;
     --hold-margin) HOLD_MARGIN="$2"; shift 2 ;;
@@ -85,8 +89,19 @@ mkdir -p "$HERE/experiments"
 # shellcheck source=scripts/nick.sh
 source "$HERE/scripts/nick.sh"
 case "$DESIGN" in
-  amx_tdpbssd) NICK="$(nick_amx "$SAT" "$TAG")" ;;
-  *) echo "FATAL: trial.sh currently targets amx_tdpbssd only" >&2; exit 2 ;;
+  amx_tdpbssd) NICK="$(nick_amx "$SAT" "$TAG")"
+               CFGLINE="SAT=$SAT PIPE=$PIPE RD_REG=$RDREG"
+               DESIGN_ARGS=(-s "$SAT" -P "$PIPE" -R "$RDREG")
+               LIM_ARGS=(-s "$SAT") ;;
+  amx_fp8)     NICK="$(nick_fp8 "$ACC" "$FXW" "$TAG")"
+               if [[ "$ACC" == "0" ]]; then
+                 CFGLINE="ACC=0 RD_REG=$RDREG"
+               else
+                 CFGLINE="ACC=1 FX_W=$FXW RD_REG=$RDREG"
+               fi
+               DESIGN_ARGS=(-A "$ACC" -W "$FXW" -R "$RDREG")
+               LIM_ARGS=(-A "$ACC" -W "$FXW") ;;
+  *) echo "FATAL: trial.sh targets amx_tdpbssd or amx_fp8" >&2; exit 2 ;;
 esac
 
 # Identify the RTL by content, not by branch state: a trial has to stay
@@ -96,7 +111,7 @@ GIT_SHA=$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DIRTY=$(git -C "$HERE" status --porcelain 2>/dev/null | head -1)
 
 echo "=============================================================="
-echo " TRIAL X${X}-Y${Y}   $DESIGN   SAT=$SAT PIPE=$PIPE RD_REG=$RDREG"
+echo " TRIAL X${X}-Y${Y}   $DESIGN   $CFGLINE"
 echo " period ${PERIOD}ns  util ${UTIL}%${HOLD_MARGIN:+  hold_margin ${HOLD_MARGIN}ns}"
 echo " rtl sha256[0:16] $RTL_SHA   git $GIT_SHA${DIRTY:+ (dirty)}"
 echo " goal: $GOAL"
@@ -113,7 +128,7 @@ set +e
 ORFS="$(sed -n 's/^ORFS *:= *//p' "$HERE/local.mk")" \
 YOSYS_EXE="$(sed -n 's/^YOSYS_EXE *:= *//p' "$HERE/local.mk")" \
 KLAYOUT_CMD="$(sed -n 's/^KLAYOUT_CMD *:= *//p' "$HERE/local.mk")" \
-  "$HERE/scripts/measure.sh" -d "$DESIGN" -s "$SAT" -P "$PIPE" -R "$RDREG" \
+  "$HERE/scripts/measure.sh" -d "$DESIGN" "${DESIGN_ARGS[@]}" \
     -p "$PERIOD" -u "$UTIL" \
     -t "$TAG" ${HOLD_MARGIN:+--hold-margin "$HOLD_MARGIN"}
 RC=$?
@@ -139,7 +154,7 @@ FLW=$(grep -rhoE 'FLW-0009\] Clock [a-z_]+ slack -?[0-9.]+' \
 # a limiter class cannot be compared to another frequency.
 LIMFILE="$HERE/work/logs/nangate45/$NICK/base/limiter.json"
 if [[ -d "$(dirname "$LIMFILE")" ]]; then
-  "$HERE/scripts/sta_limiter.sh" -d "$DESIGN" -s "$SAT" -t "$TAG" > "$LIMFILE" 2>/dev/null \
+  "$HERE/scripts/sta_limiter.sh" -d "$DESIGN" "${LIM_ARGS[@]}" -t "$TAG" > "$LIMFILE" 2>/dev/null \
     || echo '{"error":"sta_limiter.sh failed"}' > "$LIMFILE"
   echo "  limiter: $(python3 -c "import json,sys;d=json.load(open('$LIMFILE'));print(d.get('limiter_class') or d.get('error'))" 2>/dev/null || echo unknown)"
 fi
@@ -175,8 +190,16 @@ rec = {
   "x": $X, "y": $Y, "tag": "$TAG", "design": "$DESIGN",
   "goal": """$GOAL""",
   "started": "$START", "ended": "$END",
-  "knobs": {"SAT": $SAT, "PIPE": $PIPE, "RD_REG": $RDREG, "period_ns": $PERIOD, "util": $UTIL,
-            "hold_margin_ns": ${HOLD_MARGIN:-None}},
+  # Design-specific knobs, not a union of every design's. A row logging
+  # SAT and PIPE for amx_fp8 -- which has neither -- while omitting ACC, the one
+  # thing that varies, would be worse than no record: it reads as a measurement of
+  # a configuration that does not exist.
+  "knobs": (
+      {"SAT": $SAT, "PIPE": $PIPE, "RD_REG": $RDREG}
+      if "$DESIGN" == "amx_tdpbssd" else
+      {"ACC": $ACC, "FX_W": $FXW, "RD_REG": $RDREG}
+  ) | {"period_ns": $PERIOD, "util": $UTIL,
+       "hold_margin_ns": ${HOLD_MARGIN:-None}},
   "rtl_sha256_16": "$RTL_SHA", "git": "$GIT_SHA", "dirty": bool("""$DIRTY"""),
   "measure_rc": $RC,
 }

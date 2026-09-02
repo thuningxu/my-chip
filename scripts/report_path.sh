@@ -24,6 +24,11 @@ ORFS="$(sed -n 's/^ORFS *:= *//p' "$HERE/local.mk")"
 DESIGN=mac_array; N=4; CPORT=1; OUTPAR=0; SAT=1
 TN=32; RDREG=0   # tpu_mmu: array dimension, readback register
 TAG=""; GROUP="core_clock"; COUNT=1
+# amx_fp8 accumulator arm and fixed-point width. Must match what measure.sh
+# built, or this reads a DIFFERENT design's directory -- see scripts/nick.sh.
+ACC=0
+FXW=52
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -d) DESIGN="$2"; shift 2 ;;
@@ -31,6 +36,8 @@ while [[ $# -gt 0 ]]; do
     -t) TAG="$2"; shift 2 ;;
     -T) TN="$2"; shift 2 ;;
     -R) RDREG="$2"; shift 2 ;;
+    -A) ACC="$2"; shift 2 ;;
+    -W) FXW="$2"; shift 2 ;;
     -g) GROUP="$2"; shift 2 ;;
     -c) COUNT="$2"; shift 2 ;;
     --cport) CPORT="$2"; shift 2 ;;
@@ -46,7 +53,8 @@ case "$DESIGN" in
   mac_array)   NICK="$(nick "$N" "$CPORT" "$TAG" "$OUTPAR")"; CFG_DESC="N=$N C_PORT=$CPORT OUT_PAR=$OUTPAR" ;;
   amx_tdpbssd) NICK="$(nick_amx "$SAT" "$TAG")";                CFG_DESC="SAT=$SAT" ;;
   tpu_mmu)     NICK="$(nick_tpu "$TN" "$TAG")"; CFG_DESC="N=$TN RD_REG=$RDREG" ;;
-  amx_fp8)     NICK="$(nick_fp8 "$TAG")"; CFG_DESC="RD_REG=$RDREG" ;;
+  amx_fp8)     NICK="$(nick_fp8 "$ACC" "$FXW" "$TAG")"
+               CFG_DESC="RD_REG=$RDREG ACC=$ACC$([[ $ACC == 0 ]] || echo " FX_W=$FXW")" ;;
   *) echo "FATAL: unknown design '$DESIGN'" >&2; exit 2 ;;
 esac
 R="$HERE/work/results/nangate45/$NICK/base"

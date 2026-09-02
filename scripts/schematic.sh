@@ -78,6 +78,9 @@ DESIGN=mac_array
 # this target and a 32x32 grid is not a readable page. TN=2 still shows the
 # neighbour structure, which is the thing worth drawing.
 TN=${TN:-2}; RDREG=${RDREG:-1}
+# amx_fp8 accumulator arm. ACC=1 draws a DIFFERENT set of units, because the
+# fixed-point arm does not instantiate fp8_mul at all.
+ACC=${ACC:-0}; FXW=${FXW:-52}
 N=2
 CPORT=1
 OUTPAR=0
@@ -93,6 +96,8 @@ while [[ $# -gt 0 ]]; do
     -r) OUTPAR="$2"; shift 2 ;;
     -s) SAT="$2"; shift 2 ;;
     -T) TN="$2"; shift 2 ;;
+    -A) ACC="$2"; shift 2 ;;
+    -W) FXW="$2"; shift 2 ;;
     -o) OUT="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -133,10 +138,15 @@ case "$DESIGN" in
     ;;
   amx_fp8)
     RTL="$HERE/rtl/amx_fp8.v $HERE/rtl/fp8_mul.v $HERE/rtl/fp32_add.v"
+    RTL="$RTL $HERE/rtl/fx2fp32.v $HERE/rtl/maxmag64.v"
     TOPMOD=amx_fp8
-    CHPARAM="-set RD_REG $RDREG"
-    CFG_DESC="RD_REG=$RDREG"
-    NICK="$(nick_fp8 "")"
+    CHPARAM="-set RD_REG $RDREG -set ACC $ACC -set FX_W $FXW"
+    if [[ "$ACC" == "0" ]]; then
+      CFG_DESC="RD_REG=$RDREG ACC=0"
+    else
+      CFG_DESC="RD_REG=$RDREG ACC=1 FX_W=$FXW"
+    fi
+    NICK="$(nick_fp8 "$ACC" "$FXW")"
     ;;
   *)
     echo "FATAL: unknown design '$DESIGN'. Known: mac_array, amx_tdpbssd, tpu_mmu, amx_fp8" >&2
@@ -745,12 +755,48 @@ MULCHK
   # zeros, renormalise, round. Three barrel shifters and a carry chain in
   # series, 1198 mapped cells, and it sits inside the accumulate FEEDBACK loop
   # 1024 times over. amx_tdpbssd's equivalent loop is a 33-bit integer add.
+  #
+  # Under ACC=1 there are only 256 of these and NONE of them is in the loop --
+  # they do the += C once per element, in the epilogue. That relocation is the
+  # entire X2 hypothesis, so the caption has to say which arm it is describing.
   TOPMOD=fp32_add
-  view 03_add32 \
-    "fp32_add -- the accumulate loop, and the predicted critical path" \
-    "1024 instances, each in a feedback loop. Align + add + LZC + normalise + round." \
-    '' \
-    '*'
+  if [[ "$ACC" == "0" ]]; then
+    view 03_add32 \
+      "fp32_add -- the accumulate loop, and the predicted critical path" \
+      "1024 instances, each in a feedback loop. Align + add + LZC + normalise + round." \
+      '' \
+      '*'
+  else
+    view 03_add32 \
+      "fp32_add -- ACC=1 uses it ONCE per element, for the += C only" \
+      "256 instances, none in the accumulate loop. Compare ACC=0: 1024, all in the loop." \
+      '' \
+      '*'
+  fi
+
+  # ---- 4 and 5. the ACC=1 units --------------------------------------------
+  if [[ "$ACC" != "0" ]]; then
+    # What replaced fp32_add inside the loop. The LZC, normalise shifter and
+    # rounder still exist -- they have just moved OUT of the accumulation and into
+    # a once-per-element epilogue, which is the whole arithmetic argument.
+    TOPMOD=fx2fp32
+    CHPARAM="-set ACC_W $FXW"
+    view 04_fx2fp32 \
+      "fx2fp32 -- the ONE rounding, moved out of the loop" \
+      "256 instances. LZC + normalise + RNE, once per element instead of 64 times." \
+      '' \
+      '*'
+
+    # How the alignment reference is found. 63 comparators, 6 levels, and it runs
+    # on the start edge rather than in the loop.
+    TOPMOD=maxmag64
+    CHPARAM=""
+    view 05_maxmag \
+      "maxmag64 -- the alignment reference, 64 bytes to one exponent" \
+      "32 instances, evaluated once on the start edge. Keys on byte[6:0], so one tree serves both FP8 formats." \
+      '' \
+      '*'
+  fi
 
   TOPMOD="$save_top"; CHPARAM="$save_par"
 
@@ -758,11 +804,21 @@ MULCHK
   echo "Views written to $OUT:"
   echo "   01_mul8            the multiply -- 4x4, smaller than INT8's 8x8"
   echo "   02_dec8            format decode, one bit picks E5M2 or E4M3"
-  echo "   03_add32           the accumulate loop: THIS is the frequency floor"
-  echo
-  echo "Coarse cells BEFORE technology mapping. The array itself is 1024 of unit 1"
-  echo "and 1024 of unit 3; no cut of the whole thing is a readable page, which is"
-  echo "why these show the repeated units instead."
+  if [[ "$ACC" == "0" ]]; then
+    echo "   03_add32           the accumulate loop: THIS is the frequency floor"
+    echo
+    echo "Coarse cells BEFORE technology mapping. The array itself is 1024 of unit 1"
+    echo "and 1024 of unit 3; no cut of the whole thing is a readable page, which is"
+    echo "why these show the repeated units instead."
+  else
+    echo "   03_add32           now only the += C, 256 instances, OUT of the loop"
+    echo "   04_fx2fp32         the one rounding per element, FX_W=$FXW"
+    echo "   05_maxmag          the alignment reference, once on the start edge"
+    echo
+    echo "Coarse cells BEFORE technology mapping. Unit 1 is still 1024 instances, but"
+    echo "the loop now holds a CSA tree and one $FXW-bit adder instead of unit 3 --"
+    echo "which is what X2 exists to measure."
+  fi
 }
 
 # ============================== dispatch =====================================

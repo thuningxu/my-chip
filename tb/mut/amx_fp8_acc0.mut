@@ -1,0 +1,67 @@
+# Mutations for the ACC=0 arm of rtl/amx_fp8.v. Run with:
+#   scripts/mutate.sh -r rtl/amx_fp8.v -t tb/tb_amx_fp8.v -m tb/mut/amx_fp8_acc0.mut \
+#       -P "-Ptb_amx_fp8.ACC=0" \
+#       -x rtl/fp8_mul.v -x rtl/fp32_add.v -x rtl/fx2fp32.v -x rtl/maxmag64.v
+#
+#=========================================================== WHY THIS EXISTS
+# X2's one inviolable condition is that ACC=0 stays bit-identical to row p1. The
+# 28 passing cases and the four golden constants show that the CURRENT bytes are
+# right; they say nothing about whether the tests would still NOTICE if the
+# parameterisation had quietly broken the conformant path.
+#
+# That is not a hypothetical. Introducing ACC moved the p1 datapath inside an
+# `if (ACC == 0)` generate arm and moved the cacc flop block outside it, driven
+# through two new wires. Either change could have gone wrong in a way that a
+# passing test suite would hide if the suite had no teeth on the p1 arm.
+#
+# So these mutations attack the ACC=0 path specifically, including the shared
+# plumbing the fork created.
+
+#-------------------------------------------------- the epilogue schedule (p1)
+# The lane combine order. tb/fp8_golden.py measures that a balanced tree and a
+# sequential chain disagree on ~23% of elements, so these must be caught.
+EP0 pairs 0+2 and 1+3          ||| s/                        assign opb = ep0 \? lacc\[1\*ACC_W \+: ACC_W\]/                        assign opb = ep0 ? lacc[2*ACC_W +: ACC_W]/
+EP1 combines the wrong lane    ||| s/                                   : ep1 \? lacc\[2\*ACC_W \+: ACC_W\]/                                   : ep1 ? lacc[1*ACC_W +: ACC_W]/
+lane 2 never pairs with lane 3 ||| s/                        assign opb = ep0 \? lacc\[3\*ACC_W \+: ACC_W\]\n                                         : prod\[2\*ACC_W \+: ACC_W\];/                        assign opb = prod[2*ACC_W +: ACC_W];/
+EP2 adds C to the wrong lane   ||| s/                                   : ep2 \? cacc\[gm\]\[gn\]/                                   : ep2 ? lacc[3*ACC_W +: ACC_W]/
+lane 0 loses its EP1 enable    ||| s/                        assign len\[gb\] = acc_phase \| ep0 \| ep1;/                        assign len[gb] = acc_phase | ep0;/
+lane 2 loses its EP0 enable    ||| s/                        assign len\[gb\] = acc_phase \| ep0;/                        assign len[gb] = acc_phase;/
+accumulate one cycle short     ||| s/    wire       acc_phase = run && \(ccnt < KDW\[CW-1:0\]\);/    wire       acc_phase = run \&\& (ccnt < KDW[CW-1:0] - 1);/
+instruction ends one cycle early ||| s/    localparam integer LASTC = \(ACC == 0\) \? EP2 : EP1;/    localparam integer LASTC = (ACC == 0) ? EP1 : EP1;/
+
+#----------------------------------------------- the lane accumulators (p1)
+lanes not cleared at start     ||| s/                    if \(lane_clr\)    lacc\[0\*ACC_W \+: ACC_W\] <= \{ACC_W\{1.b0\}\};/                    if (1'b0)        lacc[0*ACC_W +: ACC_W] <= {ACC_W{1'b0}};/
+lane 1 fed lane 0's product    ||| s/                    end else begin : g_opb_plain\n                        assign opb = prod\[gb\*ACC_W \+: ACC_W\];/                    end else begin : g_opb_plain\n                        assign opb = prod[0*ACC_W +: ACC_W];/
+# SURVIVES, and correctly. fp32_add is commutative -- tb_fp32_add.v asserts it on
+# every one of its 121k vectors, and the unit does an internal magnitude swap so
+# both ports are symmetric in delay as well as in value. Which port carries the
+# loop is therefore a DOCUMENTATION choice, not a correctness one: rtl/amx_fp8.v
+# says "operand A is always lacc[gb], straight out of the flop", and that sentence
+# describes intent rather than a constraint the tests could enforce. Recorded so a
+# reader does not go looking for the missing test.
+=adder operands swapped        ||| s/                        .a \(lacc\[gb\*ACC_W \+: ACC_W\]\),\n                        .b \(opb\),/                        .a (opb),\n                        .b (lacc[gb*ACC_W +: ACC_W]),/
+
+#---------------------------------------- the plumbing the ACC fork created
+# c_next / c_wr are new wires that both arms drive and one flop block consumes.
+# If the fork had crossed them, ACC=0 would write C from the wrong place.
+C written from lane 1 not 0    ||| s/                assign c_next = sum\[0\*ACC_W \+: ACC_W\];/                assign c_next = sum[1*ACC_W +: ACC_W];/
+C write enable stuck on        ||| s/                assign c_wr   = ep2;/                assign c_wr   = 1'b1;/
+C write enable never fires     ||| s/                assign c_wr   = ep2;/                assign c_wr   = 1'b0;/
+C tile load loses its row test ||| s/                    if \(tile_we && tile_sel == SEL_C && tile_row == gm\)/                    if (tile_we \&\& tile_sel == SEL_C)/
+C tile load beats nothing      ||| s/                    else if \(c_wr\)\n                        cacc\[gm\]\[gn\] <= c_next;/                    else if (1'b0)\n                        cacc[gm][gn] <= c_next;/
+
+#-------------------------------------------------- operand delivery, shared
+# Common to both arms, so a break here is a break in the thing that makes the
+# ACC=0 vs ACC=1 comparison controlled.
+A dword index ignores k        ||| s/            assign a_dw_all\[gm\*32 \+: 32\] = a_flat\[gm\*512 \+ kcnt\*32 \+: 32\];/            assign a_dw_all[gm*32 +: 32] = a_flat[gm*512 +: 32];/
+B row index ignores k          ||| s/    wire \[511:0\]        b_row = b_flat\[kcnt\*512 \+: 512\];/    wire [511:0]        b_row = b_flat[0 +: 512];/
+A decoded with B's format      ||| s/    wire fmt_a = op_r\[1\];        \/\/ 1 = HF8\/E4M3/    wire fmt_a = op_r[0];/
+op read live instead of latched ||| s/    wire fmt_a = op_r\[1\];        \/\/ 1 = HF8\/E4M3/    wire fmt_a = op[1];/
+
+#---------------------------------------------------------- proven equivalent
+# Lanes 1 and 3 are DEAD from EP0 onward: EP0 consumes them combinationally on the
+# same edge that overwrites lanes 0 and 2, and nothing reads them again. So
+# widening their enable is unobservable. This was established by mutation during
+# the p1 build and is recorded in rtl/amx_fp8.v's comments; keeping it here means
+# the claim is re-checked rather than merely asserted.
+=lanes 1 and 3 enabled in EP0  ||| s/                    end else begin : g_en_plain\n                        assign len\[gb\] = acc_phase;/                    end else begin : g_en_plain\n                        assign len[gb] = acc_phase | ep0;/
