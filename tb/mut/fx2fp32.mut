@@ -1,0 +1,68 @@
+# Mutations for rtl/fx2fp32.v -- run with:
+#   scripts/mutate.sh -r rtl/fx2fp32.v -t tb/tb_fx2fp32.v -m tb/mut/fx2fp32.mut
+#
+# Format:  name ||| perl -0pi expression
+# A `=` prefix means the mutation is EXPECTED to survive because it is provably
+# equivalent; the reason is written above it. See scripts/mutate.sh.
+
+#---------------------------------------------------------------- leading-zero count
+# The LZC is the block's whole reason to be more than a mux, and a 6-level binary
+# search is the easiest thing here to get subtly wrong.
+lzc bottom level inverted     ||| s/assign lz\[0\] = ~l0\[1\];/assign lz[0] = l0[1];/
+lzc top level compares low    ||| s/assign lz\[5\] = \(lzin\[63:32\] == 32.d0\);/assign lz[5] = (lzin[31:0] == 32'd0);/
+lzc level 4 wrong half        ||| s/wire \[31:0\] l4 = lz\[5\] \? lzin\[31:0\]  : lzin\[63:32\];/wire [31:0] l4 = lz[5] ? lzin[63:32] : lzin[31:0];/
+lzc level 2 nibble compare    ||| s/assign lz\[2\] = \(l2\[7:4\] == 4.d0\);/assign lz[2] = (l2[3:0] == 4'd0);/
+lzin right-justified          ||| s/wire \[63:0\] lzin = \{mag, \{\(64-ACC_W\)\{1.b0\}\}\};/wire [63:0] lzin = {{(64-ACC_W){1'b0}}, mag};/
+normalise shifts right        ||| s/wire \[ACC_W-1:0\] norm = mag << lz;/wire [ACC_W-1:0] norm = mag >> lz;/
+
+#---------------------------------------------------------------- rounding
+# RNE is the one thing X2 must get right: ACC=1's entire accuracy claim is "one
+# correctly-rounded conversion instead of 64 roundings".
+round-half-up (drop RNE)      ||| s/wire        roundup = r_bit & \(sticky \| sig24\[0\]\);/wire        roundup = r_bit;/
+ties always down              ||| s/wire        roundup = r_bit & \(sticky \| sig24\[0\]\);/wire        roundup = r_bit \& sticky;/
+truncate (never round)        ||| s/wire        roundup = r_bit & \(sticky \| sig24\[0\]\);/wire        roundup = 1'b0;/
+ties break on the wrong bit   ||| s/wire        roundup = r_bit & \(sticky \| sig24\[0\]\);/wire        roundup = r_bit \& (sticky | sig24[1]);/
+sticky range off by one       ||| s/wire        sticky = \|norm\[ACC_W-26:0\];/wire        sticky = |norm[ACC_W-27:0];/
+sticky swallows the round bit ||| s/wire        sticky = \|norm\[ACC_W-26:0\];/wire        sticky = |norm[ACC_W-25:0];/
+round bit off by one          ||| s/wire        r_bit  = norm\[ACC_W-25\];/wire        r_bit  = norm[ACC_W-24];/
+significand off by one bit    ||| s/wire \[23:0\] sig24  = norm\[ACC_W-1 -: 24\];/wire [23:0] sig24  = norm[ACC_W-2 -: 24];/
+significand 23 bits not 24    ||| s/wire \[23:0\] sig24  = norm\[ACC_W-1 -: 24\];/wire [23:0] sig24  = {norm[ACC_W-1 -: 23], 1'b0};/
+# m_rnd = sig24 + roundup with sig24 24 bits and roundup 1 bit, so the ONLY way to
+# carry out of bit 24 is 0xFFFFFF + 1 -- verified exhaustively over the top 16 sig
+# values, the single carrying case. m_ovf therefore implies m_rnd == 0x1000000, and
+# then m_rnd[24:1] = 0x800000 while m_rnd[23:0] = 0x000000: both store fraction 0,
+# because the leading 1 is implicit. So the mux is dead for the stored bits and this
+# mutation cannot be observed. The exponent bump is a SEPARATE term and IS tested --
+# see "m_ovf not bumping exponent", which is killed by 172 vectors.
+#
+# The mux is kept anyway: rtl/fp32_add.v:179 has the identical line, and that design
+# is mutation-tested and routed. Diverging the new leaf from its verified sibling to
+# save ~24 muxes x 256 instances, with no measurement, is not a trade worth making.
+=carry-out mux is dead        ||| s/wire \[23:0\] m_fin  = m_ovf \? m_rnd\[24:1\] : m_rnd\[23:0\];/wire [23:0] m_fin  = m_rnd[23:0];/
+m_ovf not bumping exponent    ||| s/wire signed \[11:0\] e_fin = e_unb \+ \$signed\(\{11.d0, m_ovf\}\);/wire signed [11:0] e_fin = e_unb;/
+
+#---------------------------------------------------------------- exponent
+exponent +1                   ||| s/\+ \$signed\(E_OFF\)/+ \$signed(E_OFF) + 12'sd1/
+E_OFF = ACC_W                 ||| s/localparam \[11:0\] E_OFF = ACC_W - 1;/localparam [11:0] E_OFF = ACC_W;/
+lz added instead of subtracted||| s/- \$signed\(\{\{\(12-LZW\)\{1.b0\}\}, lz\}\);/+ \$signed({{(12-LZW){1'b0}}, lz});/
+low not sign-extended         ||| s/\$signed\(\{\{2\{low\[9\]\}\}, low\}\)/\$signed({2'b00, low})/
+bias 126 not 127              ||| s/\$signed\(12.d127\)/\$signed(12'sd126)/
+
+#---------------------------------------------------------------- magnitude / sign
+negate missing the +1         ||| s/wire \[ACC_W-1:0\] mag = sgn \? \(~acc \+ \{\{\(ACC_W-1\)\{1.b0\}\}, 1.b1\}\) : acc;/wire [ACC_W-1:0] mag = sgn ? (~acc) : acc;/
+sign taken from the wrong bit ||| s/wire sgn = acc\[ACC_W-1\];/wire sgn = acc[ACC_W-2];/
+magnitude never negated       ||| s/wire \[ACC_W-1:0\] mag = sgn \? \(~acc \+ \{\{\(ACC_W-1\)\{1.b0\}\}, 1.b1\}\) : acc;/wire [ACC_W-1:0] mag = acc;/
+
+#---------------------------------------------------------------- rails
+FTZ boundary ef<0             ||| s/wire underflow = \(ef <= \$signed\(12.d0\)\);/wire underflow = (ef < \$signed(12'd0));/
+overflow boundary ef>255      ||| s/wire overflow  = \(ef >= \$signed\(12.d255\)\);/wire overflow  = (ef > \$signed(12'd255));/
+overflow returns max finite   ||| s/: overflow  \? \{sgn, 8.hFF, 23.d0\}/: overflow  ? {sgn, 8'hFE, 23'h7FFFFF}/
+FTZ drops the sign (-0 lost)  ||| s/: underflow \? \{sgn, 31.d0\}/: underflow ? 32'd0/
+overflow and underflow swapped||| s/: overflow  \? \{sgn, 8.hFF, 23.d0\}\n             : underflow \? \{sgn, 31.d0\}/: overflow  ? {sgn, 31'd0}\n             : underflow ? {sgn, 8'hFF, 23'd0}/
+
+#---------------------------------------------------------------- proven equivalent
+# mag == 0 only when acc == 0 (negating 0 gives 0), and acc == 0 forces
+# acc[ACC_W-1] == 0, so sgn is 0 in this branch and {sgn,31'd0} IS 32'd0.
+# Verified directly: acc=0 yields 0x00000000 at all 1024 values of `low`.
+# This one SURVIVING is the correct outcome, and tb phase 5 pins the fact.
+=zero branch keeps sign bit   ||| s/assign y = is_zero   \? 32.d0/assign y = is_zero   ? {sgn, 31'd0}/

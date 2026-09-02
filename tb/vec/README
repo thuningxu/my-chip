@@ -1,0 +1,52 @@
+Cross-language vector files. Each one ties a Verilog leaf to the Python model in
+tb/fp8_golden.py that generates the array-level golden constants.
+
+WHY THESE ARE CHECKED IN. The array testbench asserts a handful of golden constants
+produced by fp8_golden.py. If a leaf and that model disagree, the array testbench
+fails and points at the array -- which is the wrong place to look, and during the p1
+build that misdirection cost real time twice. A few thousand vectors per leaf makes
+the tie explicit and cheap to re-check.
+
+They are also NOT a substitute for the testbench's own reference model. tb_fx2fp32
+compares against an independently structured Verilog model (loop-based bit length,
+right-shift extraction) on 135k vectors; these 6000 only pin the cross-language
+agreement. Both matter: the first catches implementation bugs, the second catches a
+spec disagreement between the RTL and the oracle.
+
+--------------------------------------------------------------------------------
+fx2fp32_w52.hex   6000 vectors, 112-bit words: acc[111:48] low[47:32] want[31:0]
+
+  ACC_W-specific -- `low` and the accumulator width only make sense together, so
+  the width is in the filename and tb_fx2fp32 skips the phase if ACC_W differs.
+
+  `low` is drawn as `ref + 8 - 52` for ref in [-29, 31], which is amx_fp8's real
+  range, not an arbitrary one. Magnitudes have uniformly distributed bit length so
+  the leading-zero count is exercised evenly rather than sitting near 52.
+
+  The generator asserts fx_to_fp32() == frac_to_fp32() on every vector BEFORE
+  writing the file, so a vector file can never encode a disagreement between the
+  two Python paths. Regenerate:
+
+    python3 - <<'PY'
+    import sys, random; sys.path.insert(0,'tb')
+    from fp8_golden import fx_to_fp32, frac_to_fp32
+    from fractions import Fraction
+    W=52; M=1<<W; H=1<<(W-1)
+    random.seed(20260902)
+    rows=[]
+    for _ in range(6000):
+        bl = random.randint(0, W)
+        tc = (random.getrandbits(bl) if bl else 0) & (M-1)
+        if random.random() < 0.5: tc = (-tc) & (M-1)
+        sv  = tc - M if tc >= H else tc
+        ref = random.randint(-29, 31)
+        low = ref + 8 - W
+        a = fx_to_fp32(sv, ref, W)
+        b = frac_to_fp32(Fraction(sv) * Fraction(2)**low)
+        assert a == b, (hex(tc), ref, hex(a), hex(b))
+        rows.append("%016X%04X%08X" % (tc, low & 0xFFFF, a))
+    open('tb/vec/fx2fp32_w52.hex','w').write("\n".join(rows)+"\n")
+    PY
+
+  The seed is fixed so the file is reproducible and a diff is meaningful. Bumping it
+  is fine; leaving it unpinned is not.

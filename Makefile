@@ -48,8 +48,27 @@ RDREG  ?= 0
 
 # tb_fp32_add random-vector count. 20000 is the routine gate; the adder is the
 # block that appears 1024 times, so a deep run (NRAND=500000) before a release is
-# cheap insurance.
+# cheap insurance. Also used by tb_fx2fp32.
 NRAND  ?= 20000
+
+# amx_fp8 accumulator style -- the X2 experiment.
+#   ACC=0  four separately-rounded IEEE FP32 lane accumulators. The reading of
+#          Intel's patent EP4398097A2 that row p1 shipped, and the ONLY mode that
+#          claims ISA bit-exactness. Never change what this produces.
+#   ACC=1  one wide truncating fixed-point accumulator per output element, aligned
+#          to a per-element reference exponent, rounded ONCE at write-back. Cheaper
+#          AND measurably more accurate, but a deliberate deviation -- in the same
+#          spirit as SAT=1 on amx_tdpbssd, and every row must be labelled with it.
+ACC    ?= 0
+
+# Fixed-point accumulator width, used only when ACC=1. 52 comes from a measured
+# sweep against the exact rational sum over 1500 random dot products: 44 is bare
+# parity with ACC=0, 48 is 29x better but not exact, 52 matches the exact sum on
+# 100% of trials at ~1 ULP worst case, 56 is exact and wasteful. The window's LSB
+# sits at ref + 8 - ACC_W, so ACC_W-8 bits fall below the reference exponent -- the
+# +8 is real carry headroom for 64 addends, not slack. See experiments/harness_fp8.md,
+# where an earlier 48 was corrected to 52 for exactly that reason.
+ACCW   ?= 52
 
 # tpu_mmu array dimension. MACs = TN*TN, so TN=32 gives 1024 -- deliberately the
 # same multiplier count as amx_tdpbssd, which is what makes systolic-vs-broadcast
@@ -227,6 +246,13 @@ sim-fp8units: $(BUILD)
 	@vvp $(BUILD)/tb_fp8_mul.vvp | tee $(BUILD)/sim_fp8_mul.log
 	@grep -q '^RESULT: PASS' $(BUILD)/sim_fp8_mul.log \
 	  || { echo "fp8_mul regression FAILED"; exit 1; }
+	@echo "== fixed-point to FP32 converter regression (ACC_W=$(ACCW)) =="
+	@$(IVERILOG) -g2005 -o $(BUILD)/tb_fx2fp32_w$(ACCW).vvp \
+	  -Ptb_fx2fp32.ACC_W=$(ACCW) -Ptb_fx2fp32.NRAND=$(NRAND) \
+	  tb/tb_fx2fp32.v rtl/fx2fp32.v
+	@vvp $(BUILD)/tb_fx2fp32_w$(ACCW).vvp | tee $(BUILD)/sim_fx2fp32_w$(ACCW).log
+	@grep -q '^RESULT: PASS' $(BUILD)/sim_fx2fp32_w$(ACCW).log \
+	  || { echo "fx2fp32 regression FAILED"; exit 1; }
 
 .PHONY: sim-fp8
 # The AMX-FP8 array regression. All four instructions in one netlist, so there is
