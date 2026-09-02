@@ -428,6 +428,161 @@ def tdp_fp8(C, A_phys, B_phys, op, add=fp32_add_exact, sequential_combine=False)
     return out
 
 
+# ------------------------------ ACC=1: the X2 wide fixed-point accumulator ----
+# One WIDE TRUNCATING accumulator per output element instead of four separately
+# rounded FP32 lanes. Declared in experiments/harness_fp8.md as X2.
+#
+# THE WINDOW, derived rather than guessed, because an off-by-one here is invisible
+# to random testing and shows up only as a wrong last bit:
+#
+#     ref = max_exp(A row m) + max_exp(B col n) + 1
+#     low = ref + 8 - acc_w                       the accumulator's LSB position
+#
+# ref is an UPPER BOUND on any product's MSB. A product is
+# sig4_a*sig4_b * 2^(ea+eb-6) with each sig4 in [8,15], so it lies in
+# [1, 3.52) * 2^(ea+eb) and its MSB sits at ea+eb or ea+eb+1, hence <= ref.
+# Sixty-four of them reach 64 * 1.76 * 2^ref = 2^(ref+6.8), so the accumulator's
+# top bit must sit at 2^(ref+7) -- which is +8 once the sign bit is counted.
+#
+# That leaves acc_w - 8 bits below the reference, NOT acc_w - 2. The first width
+# sweep in harness_fp8.md assumed the latter and was optimistic by 6 bits; the
+# correction is appended there rather than edited in.
+#
+# Truncation is toward MINUS INFINITY, because that is what an arithmetic right
+# shift does. No round-to-nearest and no sticky bit: dropping the sticky is the
+# whole point of the generation.
+
+
+def maxmag_rows(A_phys):
+    """max of byte[6:0] over each physical A row -- 16 values of 7 bits.
+
+    byte[6:0] rather than the exponent field, because the field's POSITION depends
+    on the format while the tiles are written before `op` is latched. It works
+    because the exponent occupies the high bits of [6:0] in both formats, so the
+    byte with the largest [6:0] also has the largest exponent, which is all the
+    reference needs. The bias is subtracted later, once the format is known.
+    """
+    return [max(b & 0x7F for b in row) for row in A_phys]
+
+
+def maxmag_cols(B_phys):
+    """max of byte[6:0] over each LOGICAL B column n: bytes 4n..4n+3 of every
+    physical row. In hardware this is a running max across all 16 B writes."""
+    return [max(B_phys[k][4 * n + b] & 0x7F
+                for k in range(KDW) for b in range(LANES))
+            for n in range(DWORDS)]
+
+
+def ref_exp(maxmag, fmt):
+    """Unbiased exponent of a max-magnitude byte. An all-zero row yields a
+    harmlessly negative reference: every product is then zero and the accumulator
+    never leaves 0, so the value is unused."""
+    ebits, mbits, bias, _ = _FMT[fmt]
+    return ((maxmag >> mbits) & ((1 << ebits) - 1)) - bias
+
+
+def fx_accumulate(a_row, b_col, fmt_a, fmt_b, ref, acc_w):
+    """One output element's fixed-point accumulation.
+
+    Returns (acc_int, (saw_nan, saw_pinf, saw_ninf)). Specials cannot pass through
+    a fixed-point accumulator, so they are tracked beside it and override at the
+    end -- which is also what ACC=0 does semantically, since there an Inf product
+    poisons its lane and the combine tree propagates it.
+    """
+    low = ref + 8 - acc_w
+    scale = Fraction(2) ** low
+    acc = 0
+    saw_nan = saw_pinf = saw_ninf = False
+    for K in range(KLOG):
+        xb, yb = a_row[K], b_col[K]
+        ca, cb = fp8_class(xb, fmt_a), fp8_class(yb, fmt_b)
+        sign = ((xb >> 7) & 1) ^ ((yb >> 7) & 1)
+        inf_times_zero = ((ca == "inf" and cb == "zero")
+                          or (cb == "inf" and ca == "zero"))
+        if ca == "nan" or cb == "nan" or inf_times_zero:
+            saw_nan = True
+        elif ca == "inf" or cb == "inf":
+            if sign:
+                saw_ninf = True
+            else:
+                saw_pinf = True
+        elif ca == "zero" or cb == "zero":
+            pass                                    # contributes nothing
+        else:
+            acc += fp8_exact(xb, fmt_a) * fp8_exact(yb, fmt_b) // scale
+    return acc, (saw_nan, saw_pinf, saw_ninf)
+
+
+def fx_to_fp32(acc, ref, acc_w):
+    """The accumulator's exact value, rounded ONCE to FP32 with RNE."""
+    if acc == 0:
+        return POS_ZERO
+    return _round_pack(1 if acc < 0 else 0, abs(acc), ref + 8 - acc_w)
+
+
+def frac_to_fp32(ex):
+    """Correctly-rounded FP32 of an exact dyadic rational. The yardstick every
+    accumulator width is measured against -- NOT the exact value itself, which is
+    usually unrepresentable."""
+    if ex == 0:
+        return POS_ZERO
+    a = abs(ex)
+    return _round_pack(1 if ex < 0 else 0, a.numerator,
+                       -(a.denominator.bit_length() - 1))
+
+
+def fx_specials(flags):
+    """The special-value override, or None to use the accumulator."""
+    saw_nan, saw_pinf, saw_ninf = flags
+    if saw_nan or (saw_pinf and saw_ninf):
+        return QNAN
+    if saw_pinf:
+        return POS_INF
+    if saw_ninf:
+        return NEG_INF
+    return None
+
+
+def tdp_fp8_fx(C, A_phys, B_phys, op, acc_w=52, add=fp32_add_exact):
+    """ACC=1. C += A@B with ONE wide truncating accumulator per output element.
+
+    A DELIBERATE DEVIATION from the ISA reading tdp_fp8() implements, in the same
+    spirit as SAT=1 in amx_tdpbssd -- and it is MORE accurate, not equal, because
+    one truncation beats 64 sequential roundings.
+    """
+    fmt_a, fmt_b = op_formats(op)
+    mm_a, mm_b = maxmag_rows(A_phys), maxmag_cols(B_phys)
+    out = [list(r) for r in C]
+    for m in range(ROWS):
+        a_row = [A_phys[m][K] for K in range(KLOG)]
+        for n in range(DWORDS):
+            b_col = [B_phys[K // 4][4 * n + (K % 4)] for K in range(KLOG)]
+            ref = ref_exp(mm_a[m], fmt_a) + ref_exp(mm_b[n], fmt_b) + 1
+            acc, flags = fx_accumulate(a_row, b_col, fmt_a, fmt_b, ref, acc_w)
+            sp = fx_specials(flags)
+            s = sp if sp is not None else fx_to_fp32(acc, ref, acc_w)
+            out[m][n] = add(s, out[m][n])
+    return out
+
+
+def fx_overflows(A_phys, B_phys, op, acc_w):
+    """True if any element's accumulation leaves the acc_w-bit two's complement
+    range. The +8 headroom is supposed to make this impossible; the self-test
+    checks it rather than trusting the algebra."""
+    fmt_a, fmt_b = op_formats(op)
+    mm_a, mm_b = maxmag_rows(A_phys), maxmag_cols(B_phys)
+    lim = 1 << (acc_w - 1)
+    for m in range(ROWS):
+        a_row = [A_phys[m][K] for K in range(KLOG)]
+        for n in range(DWORDS):
+            b_col = [B_phys[K // 4][4 * n + (K % 4)] for K in range(KLOG)]
+            ref = ref_exp(mm_a[m], fmt_a) + ref_exp(mm_b[n], fmt_b) + 1
+            acc, _ = fx_accumulate(a_row, b_col, fmt_a, fmt_b, ref, acc_w)
+            if acc >= lim or acc < -lim:
+                return True
+    return False
+
+
 def matmul_ref(A, B, C=None, op=OP_TDPBF8PS, add=fp32_add_exact):
     """Textbook, on LOGICAL matrices. Independent of the LAYOUT, only that.
 
@@ -519,6 +674,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--trials", type=int, default=2)
+    ap.add_argument("--acc-w", type=int, default=52, dest="acc_w",
+                    help="ACC=1 accumulator width for --print-golden")
     ap.add_argument("--print-golden", action="store_true",
                     help="print constants for tb/tb_amx_fp8.v and exit")
     args = ap.parse_args()
@@ -527,6 +684,14 @@ def main():
         for op in (OP_TDPBF8PS, OP_TDPBHF8PS, OP_TDPHBF8PS, OP_TDPHF8PS):
             fa, fb = op_formats(op)
             got = tdp_fp8(zero_c(), pack_a(asym_a(fa)), pack_b(asym_b(fb)), op)
+            print("op=%d %-10s C[0][0]=%08x C[0][1]=%08x C[1][0]=%08x C[15][15]=%08x"
+                  % (op, OP_NAMES[op], got[0][0], got[0][1], got[1][0], got[15][15]))
+        print()
+        print("# ACC=1 (X2 fixed-point), acc_w=%d" % args.acc_w)
+        for op in (OP_TDPBF8PS, OP_TDPBHF8PS, OP_TDPHBF8PS, OP_TDPHF8PS):
+            fa, fb = op_formats(op)
+            got = tdp_fp8_fx(zero_c(), pack_a(asym_a(fa)), pack_b(asym_b(fb)),
+                             op, args.acc_w)
             print("op=%d %-10s C[0][0]=%08x C[0][1]=%08x C[1][0]=%08x C[15][15]=%08x"
                   % (op, OP_NAMES[op], got[0][0], got[0][1], got[1][0], got[15][15]))
         return 0
@@ -790,6 +955,99 @@ def main():
     print("  [INFO] epilogue order UNRESOLVED in the sources: balanced tree vs "
           "sequential differ in %d/%d elements (%.2f%%)"
           % (diff, total, 100.0 * diff / total if total else 0.0))
+
+    # ---- ACC=1 (X2): the wide fixed-point accumulator ---------------------
+    # 14. THE CLAIM harness_fp8.md makes: at acc_w=52 the fixed-point path equals
+    #     the correctly-rounded EXACT rational dot product on every element.
+    # The right comparison is against the CORRECTLY ROUNDED FP32 of the exact sum,
+    # not against the exact sum itself -- those differ by up to half an ulp
+    # whenever the exact sum is not representable, which is most of the time.
+    for fmt, op in ((FMT_BF8, OP_TDPBF8PS), (FMT_HF8, OP_TDPHF8PS)):
+        A, B = asym_a(fmt), asym_b(fmt)
+        got = tdp_fp8_fx(zero_c(), pack_a(A), pack_b(B), op, 52)
+        ref0 = tdp_fp8(zero_c(), pack_a(A), pack_b(B), op)
+        bad_n = 0
+        w_fx = w_lane = 0.0
+        for m in range(ROWS):
+            for n in range(DWORDS):
+                ex = exact_dot(A, B, m, n, op)
+                if got[m][n] != frac_to_fp32(ex):
+                    bad_n += 1
+                if ex != 0:
+                    w_fx = max(w_fx, abs(float((fp32_exact(got[m][n]) - ex) / ex)))
+                    w_lane = max(w_lane,
+                                 abs(float((fp32_exact(ref0[m][n]) - ex) / ex)))
+        # The bar is that ACC=1 beats ACC=0 on the same data. Claiming "always
+        # correctly rounded" would be stronger than the measurement supports.
+        ok = w_fx <= w_lane
+        print("  [%s] %-10s ACC=1 acc_w=52 vs exact: worst %.3g (ACC=0 was %.3g), "
+              "%d/%d not correctly rounded"
+              % ("PASS" if ok else "FAIL", OP_NAMES[op], w_fx, w_lane,
+                 bad_n, ROWS * DWORDS))
+        fails += not ok
+
+    # 15. the width sweep must be MONOTONIC and must bracket ACC=0. If a narrower
+    #     accumulator were not worse, the width would not be a real parameter.
+    A, B = asym_a(FMT_BF8), asym_b(FMT_BF8)
+    pa, pb = pack_a(A), pack_b(B)
+    worst = {}
+    for w in (40, 44, 48, 52):
+        got = tdp_fp8_fx(zero_c(), pa, pb, OP_TDPBF8PS, w)
+        e = 0.0
+        for m in range(ROWS):
+            for n in range(DWORDS):
+                ex = exact_dot(A, B, m, n, OP_TDPBF8PS)
+                if ex != 0:
+                    e = max(e, abs(float((fp32_exact(got[m][n]) - ex) / ex)))
+        worst[w] = e
+    mono = all(worst[a] >= worst[b] for a, b in ((40, 44), (44, 48), (48, 52)))
+    print("  [%s] ACC=1 width sweep is monotonic: %s"
+          % ("PASS" if mono else "FAIL",
+             "  ".join("w%d=%.2g" % (w, worst[w]) for w in sorted(worst))))
+    fails += not mono
+
+    # 16. ACC=1 MUST differ from ACC=0. It is a deviation, not an optimisation,
+    #     and a test suite that could not tell them apart would prove nothing.
+    c0 = tdp_fp8(zero_c(), pa, pb, OP_TDPBF8PS)
+    c1 = tdp_fp8_fx(zero_c(), pa, pb, OP_TDPBF8PS, 52)
+    ndiff = sum(1 for m in range(ROWS) for n in range(DWORDS)
+                if c0[m][n] != c1[m][n])
+    print("  [%s] ACC=1 differs from ACC=0 in %d/%d elements (it is a DEVIATION)"
+          % ("PASS" if ndiff else "FAIL", ndiff, ROWS * DWORDS))
+    fails += not ndiff
+
+    # 17. the +8 headroom must make overflow impossible, at every width
+    ovf = [w for w in (40, 44, 48, 52, 56)
+           if fx_overflows(pa, pb, OP_TDPBF8PS, w)]
+    print("  [%s] no accumulator overflow at any width (+8 headroom holds)%s"
+          % ("PASS" if not ovf else "FAIL",
+             "" if not ovf else "  overflows at %s" % ovf))
+    fails += bool(ovf)
+
+    # 18. specials cannot pass through fixed point, so they ride beside it
+    one = one_byte(FMT_BF8)
+    cases = [(0x7C, one, POS_INF, "Inf x 1 -> Inf"),
+             (0x7C, 0x00, QNAN, "Inf x 0 -> NaN"),
+             (0x7D, one, QNAN, "NaN propagates"),
+             (0x7C, 0x80 | one, NEG_INF, "Inf x -1 -> -Inf")]
+    bad = []
+    for xb, yb, want, why in cases:
+        Ax = [[xb] * KLOG for _ in range(ROWS)]
+        Bx = [[yb] * DWORDS for _ in range(KLOG)]
+        r = tdp_fp8_fx(zero_c(), pack_a(Ax), pack_b(Bx), OP_TDPBF8PS, 52)
+        if any(v != want for row in r for v in row):
+            bad.append("%s: got %08x" % (why, r[0][0]))
+    # and +Inf together with -Inf must be NaN, not either infinity
+    Ax = [[0x7C] * KLOG for _ in range(ROWS)]
+    Bx = [[one if K % 2 else (0x80 | one) for _ in range(DWORDS)]
+          for K in range(KLOG)]
+    r = tdp_fp8_fx(zero_c(), pack_a(Ax), pack_b(Bx), OP_TDPBF8PS, 52)
+    if any(not is_nan(v) for row in r for v in row):
+        bad.append("(+Inf)+(-Inf) should be NaN")
+    print("  [%s] ACC=1 specials override the accumulator%s"
+          % ("PASS" if not bad else "FAIL",
+             "" if not bad else "  " + "; ".join(bad)))
+    fails += bool(bad)
 
     print("\nRESULT: %s" % ("PASS" if fails == 0 else "FAIL (%d)" % fails))
     return 1 if fails else 0
