@@ -410,3 +410,94 @@ Recorded now so it cannot be retrofitted as though it had been foreseen.
 attempt started at 7.00 ns and was aborted precisely because it would have closed
 with `|TNS| ≈ 0` and measured the constraint instead of the design. Starting
 aggressive and relaxing is the only order that cannot make that mistake.
+
+---
+
+## X2-Y1 — FAILED to route, and the failure is a target choice, not a refutation
+
+| # | config | Period | outcome |
+|---|---|---|---|
+| y1 | `ACC=1 FX_W=52 RD_REG=1` | 3.00 ns | **`[ERROR GRT-0116]` global routing finished with congestion** |
+
+Global route ran its 30 congestion iterations plus extras over 34 min, 2,310,747
+nets, then gave up. No `6_final.*`, so **no PPA row exists and none is claimed.**
+
+### It failed while winning on every gate and wire metric
+
+Equal-stage comparisons, which are admissible because both are stage-final JSON at
+the same stage of the same flow:
+
+| stage-final metric | Y0 `ACC=0` 5.75 ns | Y1 `ACC=1` 3.00 ns | |
+|---|---|---|---|
+| synthesis cells | 2,877,842 | 1,679,642 | **−41.6%** |
+| synthesis area µm² | 4,003,700 | 2,370,960 | **−40.8%** |
+| detailed-place cells | 3,522,293 | 2,169,105 | −38.4% |
+| CTS cells | 3,601,374 | 2,205,839 | **−38.8%** |
+| CTS area µm² | 4,585,620 | 2,857,360 | −37.7% |
+| global-route wirelength µm | 85,495,023 | 57,627,966 | **−32.6%** |
+| routed nets | 3,673,275 | 2,310,747 | −37.1% |
+
+So the fixed-point accumulator is **not** more wire-hungry in aggregate — it is
+one third *less*. That refutes the obvious explanation before it gets made.
+
+### The discriminator is LOCAL congestion, and Y1 is close rather than far
+
+| | Y0 | Y1 |
+|---|---|---|
+| routability final weighted congestion | **0.9878** | **1.0964** |
+| utilization after detailed place | 0.4513 | 0.4764 |
+| utilization after CTS | 0.4583 | 0.4824 |
+
+Both were *asked* for 40%. Y0 drifted to 45.8%, Y1 to 48.2%. Y0 came in 1.2% under
+the congestion limit and passed; Y1 went 9.6% over and failed. **Y1 is marginal, not
+hopeless** — and both rows tripped the placer's
+`could not reach target` routability message, so the difference is one of degree.
+
+### The cause is that 3.00 ns over-constrained it
+
+Pre-route, at the CTS checkpoint:
+
+| | target | CTS setup WS | implied period | implied MHz |
+|---|---|---|---|---|
+| Y0 `ACC=0` | 5.75 ns | −0.1840 | 5.934 ns | 169 |
+| Y1 `ACC=1` | 3.00 ns | −0.8039 | **3.804 ns** | **263** |
+
+**These are PRE-ROUTE stage numbers and are not frequencies.** Routing adds delay and
+Y1 never routed, so 263 MHz is not a result and must not be quoted as one. What it
+does establish is the *direction*: at the same stage of the same flow the fixed-point
+arm is tracking ~1.56× Y0's clock with ~39% fewer cells.
+
+And it says what went wrong. The design wants ~3.80 ns; it was asked for 3.00. To
+chase 0.80 ns it could not reach, the placer traded spreading for timing — utilization
+drifted 2.4 points higher than Y0's — and the router then had no local capacity left.
+That is the *same* mistake as p1's aborted 7.00 ns attempt, in the opposite direction:
+7.00 measured the constraint instead of the design, 3.00 asked for something the
+design cannot give and paid for it in placement quality.
+
+### What this does and does not say about X2's premise
+
+**Supported:** the accumulate is cheaper and shorter. −38.8% cells and −32.6%
+wirelength at equal stage, and a CTS-stage path 1.56× faster.
+
+**Refuted:** my own prediction refinement, immediately above, that ACC=1's floor is
+"~3.3 ns, 285–300 MHz" because of the epilogue `fp32_add`. The CTS checkpoint says
+3.804 ns pre-route, so the floor is *higher* than I estimated, and routing will push
+it higher still. The epilogue-adder argument was directionally right and
+quantitatively too optimistic.
+
+**Untested:** whether ACC=1 routes at all. That is now the open question, and it is a
+physical-design question rather than an arithmetic one.
+
+### Y ladder, extended
+
+| Y | config | change | why |
+|---|---|---|---|
+| **Y2** | `ACC=1 FX_W=52` @ **4.00 ns** | target only | The CTS checkpoint says the design wants 3.804 ns. 4.00 gives routing headroom above that instead of fighting for 0.80 ns it cannot have. **The single most likely fix, and it changes nothing about the design.** |
+| **Y3** | `ACC=1 FX_W=52` @ 4.00 ns, `-u 30` | utilization | Only if Y2 still congests. Trades die area for routing capacity — the textbook response to GRT-0116, and it makes the area comparison against Y0 unfair, so it is second choice not first |
+| **Y4** | `ACC=1 FX_W=44` @ 4.00 ns | narrower datapath | Only if Y2 and Y3 both congest. 44 is the tightest width the mutation suite still passes clean at, so it is the last width that is defensibly correct, and it cuts every accumulator bus by 15% |
+
+Y2 is declared **before** it runs. Prediction: it routes, and lands between 3.9 and
+4.3 ns — so 230–256 MHz, against Y0's 170.0. If Y2 *also* congests at a target its own
+CTS checkpoint says is achievable, then the fixed-point datapath has a local-density
+problem that periods cannot fix, and Y3's utilization lever is the honest next move
+rather than a workaround.
