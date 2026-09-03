@@ -346,3 +346,67 @@ The 16 ACC=1 golden constants are all at disagreeing positions **because the fir
 attempt was not**: T3b and T3d originally checked four positions that happen to be
 bit-identical between the arms, so the golden set could not tell an ACC=1 build from
 an ACC=0 one. A golden constant both arms satisfy is decoration, not a cross-check.
+
+---
+
+## X2-Y0 — the re-baseline, measured
+
+| # | config | Period | Setup WS | reg→reg fmax | Limiter | endpoint | DRC | Hold WS | stdcells | flops | area µm² | power W |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| y0 | `ACC=0 RD_REG=1` | 5.75 ns | −0.1315 | **170.0 MHz** | `reg→reg` | `cacc[24][14]` | **0** | **+0.0440** | 3,602,795 | 57,867 | 4,589,500 | 28.95 |
+
+TNS −254.355 over **9,516 violating endpoints**. Flow wall time **15.11 hours**.
+Flop prediction 57,867, actual 57,867.
+
+**Not yet at its fixed point.** WS −0.1315 means the achievable period is 5.8815 ns,
+and 9,516 endpoints still violate. Per X4's rule this row is provisional: usable for
+a first-order comparison because the miss is 2.3% of the period, but not a
+fixed point.
+
+### Two things Y0 establishes, neither of them the frequency
+
+**Buffering, not logic, is most of p1's cell count.** Y0 has **3,602,795** cells
+against p1's **3,985,240** — 9.6% *fewer* — while *synthesising* 2.7% *larger*
+(2,877,842 vs 2,801,626 pre-P&R). The whole difference is timing-repair buffering
+that the 4.00 ns target forced and the 5.75 ns target did not. So p1's cell count was
+never a measure of the arithmetic; roughly 380,000 of its cells were the flow
+fighting an unreachable constraint.
+
+**The limiting endpoint MOVED, and it is still an `fp32_add` path.** p1's was a lane
+accumulator, `g_m[1].g_n[13].lacc[49]`; Y0's is a C accumulator, `cacc[24][14]`. Two
+different paths:
+
+| | path | contains |
+|---|---|---|
+| p1, 4.00 ns | `ccnt → operand mux → fp8_mul → fp32_add → lacc` | one `fp32_add` |
+| Y0, 5.75 ns | `lacc[0] → opb 4:1 mux → fp32_add → cacc` (EP2) | one `fp32_add` |
+
+Y0's path is logically *shorter* — no multiplier — so at the looser target the tool
+balanced the two until the epilogue became the binding one. **X2's premise survives
+this**: `fp32_add` is on both paths, so replacing it shortens both.
+
+### A PREDICTION REFINEMENT for Y1, written before Y1 runs
+
+The X2 declaration predicted the limiter would move "off the adder and onto the
+operand mux or the multiplier", with a floor of ~2.2–2.5 ns. **That enumeration was
+incomplete, and Y0's endpoint is what exposes it.**
+
+ACC=1 still needs **one `fp32_add` per element** for the `+= C`, on the `ep_adc`
+cycle: `acc[31:0] → fp32_add → cacc`, a pure reg-to-reg path through one adder and
+no mux at all. `fp32_add` contributed **3.306 ns** of p1's routed path. So:
+
+**ACC=1's floor is bounded below by one `fp32_add` delay, ~3.3 ns, regardless of how
+cheap the accumulate becomes.** The estimated accumulate path — operand mux 0.864 +
+decode/multiply + align shifter + 3 CSA levels + one 52-bit adder — lands around
+3.2 ns, i.e. comparable. Expect Y1 near **3.3–3.5 ns, ~285–300 MHz**, not 400–450.
+
+That is a **third** outcome the original prediction did not list: the limiter moving
+to the *epilogue* adder rather than to the front end or staying on the accumulate. If
+it happens, the next rung is not pipelining — it is getting the FP32 adder out of the
+epilogue too, e.g. by folding `+ C` into the fixed-point accumulator's initial value.
+Recorded now so it cannot be retrofitted as though it had been foreseen.
+
+**Y1 still starts at 3.00 ns**, below that estimated floor, deliberately. p1's first
+attempt started at 7.00 ns and was aborted precisely because it would have closed
+with `|TNS| ≈ 0` and measured the constraint instead of the design. Starting
+aggressive and relaxing is the only order that cannot make that mistake.

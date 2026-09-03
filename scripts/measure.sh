@@ -319,7 +319,11 @@ fi
 # Reads the synthesised netlist, which is stage-final and therefore admissible;
 # never a running report.
 if [[ "$DESIGN" == "amx_fp8" ]]; then
-  SYNV="$WORK/results/nangate45/$NICK/base/1_synth.v"
+  # 1_2_yosys.v, NOT 1_synth.v: ORFS writes the synthesised NETLIST under the
+  # yosys stage name and keeps only an .odb at 1_synth. An earlier version of this
+  # gate looked for 1_synth.v, found nothing, and skipped itself with a warning --
+  # which is how a check that never runs looks exactly like a check that passes.
+  SYNV="$WORK/results/nangate45/$NICK/base/1_2_yosys.v"
   if [[ -s "$SYNV" ]]; then
     if [[ "$ACC" == "0" ]]; then WANT="fp8_mul";  UNWANT="fx2fp32"
     else                        WANT="fx2fp32";  UNWANT="fp8_mul"
@@ -340,7 +344,10 @@ if [[ "$DESIGN" == "amx_fp8" ]]; then
     fi
     echo "   arm purity: $n_want $WANT instances, 0 $UNWANT (ACC=$ACC)"
   else
-    echo "   WARNING: no 1_synth.v at $SYNV -- arm purity NOT verified" >&2
+    echo "FATAL: no synthesised netlist at $SYNV, so the accumulator arm could" >&2
+    echo "       not be identified. A design that reached the finish stage always" >&2
+    echo "       has one; refusing to report PPA for a netlist nothing verified." >&2
+    exit 1
   fi
 fi
 
