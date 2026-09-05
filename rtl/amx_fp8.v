@@ -55,11 +55,17 @@
 //---------------------------------------------------------------- ARCHITECTURE
 // 1024 fp8 multipliers and 1024 FP32 adders, one k-step per cycle:
 //
-//   ccnt 0..15   adder b of cell (m,n):  lacc[b] <= lacc[b] + prod[b]
-//   ccnt 16      adder 0: lacc[0] + lacc[1] -> lacc[0]
-//                adder 2: lacc[2] + lacc[3] -> lacc[2]
-//   ccnt 17      adder 0: lacc[0] + lacc[2] -> lacc[0]
-//   ccnt 18      adder 0: lacc[0] + C[m][n] -> C[m][n]
+//   ccnt 0..15         k is SELECTED: operand mux, decode, fp8_mul
+//   ccnt PIPE..15+PIPE adder b of cell (m,n):  lacc[b] <= lacc[b] + prod[b]
+//   ccnt 16+PIPE       adder 0: lacc[0] + lacc[1] -> lacc[0]
+//                      adder 2: lacc[2] + lacc[3] -> lacc[2]
+//   ccnt 17+PIPE       adder 0: lacc[0] + lacc[2] -> lacc[0]
+//   ccnt 18+PIPE       adder 0: lacc[0] + C[m][n] -> C[m][n]
+//
+// At PIPE=0 the first two rows are the same cycle and there is one enable. At
+// PIPE=1 they are one cycle apart, the select window and the accumulate window
+// overlap by 15 of their 16 cycles, and the epilogue slides with them -- see the
+// PIPE parameter and EP0 for the two things that go wrong if it does not.
 //
 // THE EPILOGUE REUSES THE LANE ADDERS, and the way it does so is the point.
 // lacc[b] feeds operand A of adder b DIRECTLY, with no mux, in every cycle
@@ -94,6 +100,34 @@
 // epilogue reuse is what forces generality.
 //=============================================================================
 module amx_fp8 #(
+    // Pipeline depth in the FEED-FORWARD chain. Latency becomes 20+PIPE cycles;
+    // throughput is unchanged at one k-step per cycle either way.
+    //
+    //   0  nothing registered. ccnt -> operand mux -> fp8_mul -> fp32_add -> lacc
+    //      is ONE combinational path, measured routed at 5.373 ns on row p1.
+    //   1  register the product. Takes the 16:1 operand mux (0.864 ns) AND
+    //      fp8_mul (1.157 ns) out of the accumulate path in one move, leaving the
+    //      loop as lacc -> fp32_add -> lacc and nothing else. 2.021 ns of a
+    //      5.373 ns path -- 38% -- was feed-forward logic sitting in front of a
+    //      loop it does not belong to. See g_prod_reg for why the register is 16
+    //      bits wide and not 32.
+    //
+    // ONLY 0..1 EXIST, and the absent rung is a decision rather than an
+    // oversight. A PIPE=2 that also registered the decoded operands would split
+    // what is left of the feed-forward path -- 0.340 ns of register overhead plus
+    // 2.021 ns of logic = 2.361 ns, or 423.6 MHz -- when the accumulate loop it
+    // competes with binds at 3.692 ns. There is 1.33 ns of headroom on the side
+    // it would attack and none on the side that matters, so the rung would buy
+    // nothing measurable and would exist as dead code with a name. The next real
+    // move is pipelining fp32_add itself, and that needs interleaved
+    // accumulators, because the adder is otherwise in a one-cycle loop.
+    //
+    // WHAT PIPELINING CANNOT REACH: the accumulate is a FEEDBACK loop,
+    // lacc[b] -> fp32_add -> lacc[b], measured at 3.306 ns routed. Add the
+    // 0.340 ns any register costs (launch CLK->Q + setup + the SDC's 0.1 ns
+    // uncertainty, less useful skew) and the 0.046 ns tail and the floor is
+    // 3.692 ns / 270.9 MHz. No value of PIPE goes below that.
+    parameter integer PIPE = 0,
     // 1 registers rd_data, adding one cycle of READBACK latency.
     //
     // Defaulted ON because both prior designs MEASURED this: a multi-level
@@ -145,10 +179,24 @@ module amx_fp8 #(
                      OP_TDPHBF8PS = 2'b10,
                      OP_TDPHF8PS  = 2'b11;
 
-    // Epilogue phases. ccnt reaches 18, so 5 bits.
-    localparam integer EP0 = KDW;        // 16: lacc0+=lacc1, lacc2+=lacc3
-    localparam integer EP1 = KDW + 1;    // 17: lacc0+=lacc2
-    localparam integer EP2 = KDW + 2;    // 18: C += lacc0
+    // Epilogue phases, pushed back by PIPE. ccnt reaches 18 at PIPE=0 and 19 at
+    // PIPE=1, so 5 bits still hold it -- asserted below, not assumed.
+    //
+    // WHY THE EPILOGUE MOVES WITH PIPE, and it is not symmetry for its own sake.
+    // The product register delays only ONE of the adder's two operands. Operand B
+    // in the epilogue is muxed out of lacc/cacc (see g_opb0/g_opb2 below) and that
+    // mux is NOT delayed -- it reads flops directly. So an EP0 left at ccnt=16
+    // while the k=15 product was still inside the register would fold lacc[1] into
+    // lacc[0] on the very edge that lacc[1] was still waiting for its last
+    // product: lanes 0 and 2 would lose their k=15 term outright, because ep0
+    // steals their operand-B mux, and lanes 1 and 3 would write a k=15 result
+    // nothing ever reads again. That is a DROPPED k-step, not a reordered one, and
+    // it is silent -- 15 of 16 products still land. EP0 = KDW + PIPE is the
+    // statement "every accumulate has fully landed in lacc[b] before the tree
+    // starts". tb case O1 is what fails if this is left at KDW.
+    localparam integer EP0 = KDW + PIPE;        // 16+PIPE: lacc0+=lacc1, lacc2+=lacc3
+    localparam integer EP1 = KDW + PIPE + 1;    // 17+PIPE: lacc0+=lacc2
+    localparam integer EP2 = KDW + PIPE + 2;    // 18+PIPE: C += lacc0
     localparam integer CW  = 5;
 
     // ---- tile storage -------------------------------------------------------
@@ -171,10 +219,14 @@ module amx_fp8 #(
     wire run    = (state == S_RUN);
     wire c_last = (ccnt == EP2[CW-1:0]);
 
-    // kcnt is only meaningful during the accumulate phase; in the epilogue the
-    // low bits of ccnt select a k nobody uses.
+    // kcnt is only meaningful while sel_valid; in the epilogue, and during the
+    // PIPE flush cycles, the low bits of ccnt select a k nobody accumulates.
     wire [3:0] kcnt      = ccnt[3:0];
-    wire       acc_phase = run && (ccnt < KDW[CW-1:0]);
+    // WHICH k IS BEING SELECTED. This is the issue window, and at PIPE>=1 it is
+    // NOT the accumulate enable -- the product lands a cycle later. At PIPE=0 the
+    // two coincide, which is exactly why they were one signal before and why
+    // conflating them is the defect this split exists to prevent.
+    wire       sel_valid = run && (ccnt < KDW[CW-1:0]);
     wire       ep0       = run && (ccnt == EP0[CW-1:0]);
     wire       ep1       = run && (ccnt == EP1[CW-1:0]);
     wire       ep2       = run && (ccnt == EP2[CW-1:0]);
@@ -183,6 +235,58 @@ module amx_fp8 #(
     // that moves IDLE->RUN is already there, and ccnt==0 executes on the edge
     // after it.
     wire lane_clr = (state == S_IDLE) && start;
+
+    // sel_valid delayed, so lane b is enabled exactly when ITS product emerges
+    // from the product register -- the same 16-pulse train, PIPE cycles later.
+    // acc_phase keeps its name and every one of its existing uses (len[gb]
+    // below), so the ladder is the only thing that moved.
+    //
+    // A SHIFT REGISTER, NOT A RE-DERIVATION FROM ccnt, and that choice IS the
+    // correctness argument rather than a stylistic preference. FP32 addition is
+    // not associative, so the per-lane k-order 0..15 is part of the
+    // specification: tb/fp8_golden.py measures that merely reordering the four
+    // lane sums moves 23.05% of output elements, and a permuted k moves results
+    // by the same mechanism. A flop chain is order-preserving and gap-free by
+    // construction -- it can only translate the pulse train in time, and cannot
+    // reorder, drop or duplicate a pulse -- so k-order is guaranteed by the
+    // SHAPE of the logic. `run && (ccnt >= PIPE) && (ccnt < KDW + PIPE)` computes
+    // the same waveform today and guarantees nothing under a later edit, and the
+    // failure it invites is a QUIET one. kcnt = ccnt[3:0] WRAPS, so a pulse landing
+    // one cycle late selects k=0 again rather than selecting nothing: an
+    // off-by-one bound REORDERS the sequence to 1..15,0 instead of visibly
+    // truncating it, and all 16 products still land. That is amx_tdpbssd's acc_en
+    // mutant, where every uniform-operand case passed and only the purpose-built S6
+    // caught it.
+    //
+    // MEASURED here, by rotating kcnt one step so the k-order becomes exactly
+    // 1..15,0 with nothing dropped: 11 of 29 checks fail and 18 SURVIVE at both
+    // PIPE settings. The survivors are E1-E4, S1-S4, D1, D2, Z1, T1, T2 and X1 --
+    // every case built on uniform, zero or single-k operands, which cannot see a
+    // permutation even in principle. Of the eleven that do fail, ten fail on only
+    // 21 to 47 of 256 elements, because they catch it by rounding luck. tb case O1
+    // fails on 256 of 256, by construction, and is the only reason this is a caught
+    // bug rather than a silent one.
+    //
+    // Gating on `run` alone instead of on a delayed sel_valid would accumulate
+    // straight through the flush and epilogue cycles and corrupt the last
+    // k-steps. That mutant fails ~everything in amx_tdpbssd's table, so it is the
+    // easy one; the off-by-one is the dangerous one.
+    //
+    // v_sr IS RESET while the datapath's product register deliberately is NOT,
+    // and the asymmetry is what makes the unreset register safe: pr holds X out of
+    // power-up, but no X can reach an accumulator, because the enable that would
+    // admit it is held at 0 until sel_valid has actually been high. One reset flop
+    // per design buys 16,384 unreset ones.
+    //
+    // One bit, because the ladder has one rung. A second rung makes this
+    // `reg [1:0] v_sr; ... v_sr <= {v_sr[0], sel_valid};` with the tap at
+    // v_sr[PIPE-1], which is what amx_tdpbssd.v:200-205 already is.
+    reg v_sr;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) v_sr <= 1'b0;
+        else        v_sr <= sel_valid;
+    end
+    wire acc_phase = (PIPE == 0) ? sel_valid : v_sr;
 
     wire fmt_a = op_r[1];        // 1 = HF8/E4M3
     wire fmt_b = op_r[0];
@@ -293,6 +397,7 @@ module amx_fp8 #(
                 // them. Cleared to +0 on the start edge.
                 reg  [LANE_N*ACC_W-1:0] lacc;
                 wire [LANE_N*ACC_W-1:0] prod;
+                wire [LANE_N*ACC_W-1:0] prod_e;   // prod as the ADDER sees it
                 wire [LANE_N*ACC_W-1:0] sum;
                 wire [LANE_N-1:0]       len;
 
@@ -314,22 +419,66 @@ module amx_fp8 #(
                         .y      (prod[gb*ACC_W +: ACC_W])
                     );
 
+                    // PIPE>=1 registers the product. This is the entire fix: it
+                    // moves the 16:1 operand mux and fp8_mul off the accumulate
+                    // path together, because both are upstream of this one wire.
+                    //
+                    // SIXTEEN BITS, NOT THIRTY-TWO, and the truncation is LOSSLESS
+                    // -- not an approximation anyone has to accept. fp8_mul's
+                    // normal result is literally normal_y = {sgn, e_fld, nrm[6:0],
+                    // 16'd0} (rtl/fp8_mul.v:153): a product of two 4-bit
+                    // significands has exactly 7 fraction bits, which is the same
+                    // fact that makes the product never round. Every non-normal
+                    // fp8_mul can return has zero low bits too -- QNAN
+                    // 0x7FC00000, {sgn,8'hFF,23'd0} for Inf, {sgn,31'd0} for
+                    // signed zero. So y[15:0] is identically zero and re-supplying
+                    // 16'b0 on the far side reconstructs the value bit for bit,
+                    // including the sign of zero and the NaN encoding.
+                    //
+                    // THAT IS NOT LEFT AS AN ARGUMENT. tb/tb_fp8_mul.v asserts
+                    // "all 262144 products have y[15:0]==0" on every one of the
+                    // 4 format pairs x 256 x 256 inputs, alongside its existing
+                    // exactness check. If that check ever fails, THIS register is
+                    // silently dropping product bits, and the two must be fixed
+                    // together -- which is why the failure message there names
+                    // this file.
+                    //
+                    // Cost: 16 bits x 4 lanes x 256 cells = 16,384 flops, against
+                    // 32,768 for the naive full-width cut. +28.3% on the design's
+                    // 57,867 rather than +57%, for identical timing, because the
+                    // 16 bits removed are constants.
+                    //
+                    // No reset, like amx_tdpbssd's pipeline arms: see v_sr above
+                    // for why an unreset datapath register cannot leak X.
+                    if (PIPE >= 1) begin : g_prod_reg
+                        reg [15:0] pr;
+                        always @(posedge clk) pr <= prod[gb*ACC_W + 16 +: 16];
+                        assign prod_e[gb*ACC_W +: ACC_W] = {pr, 16'b0};
+                    end else begin : g_prod_comb
+                        assign prod_e[gb*ACC_W +: ACC_W] = prod[gb*ACC_W +: ACC_W];
+                    end
+
                     // OPERAND B ONLY IS MUXED. Operand A is always lacc[gb],
                     // straight out of the flop, so the accumulate feedback path
                     // gains nothing. Named generate arms, and only the lanes
                     // that need extra sources get any mux at all: lanes 1 and 3
                     // are pure wires.
+                    // prod_e, never prod: the accumulate arm of every one of these
+                    // muxes must be the DELAYED product, or the register would sit
+                    // beside the datapath instead of in it. The epilogue arms stay
+                    // undelayed on purpose -- lacc/cacc are already flops -- which
+                    // is the whole reason EP0 had to move to KDW+PIPE.
                     wire [ACC_W-1:0] opb;
                     if (gb == 0) begin : g_opb0
                         assign opb = ep0 ? lacc[1*ACC_W +: ACC_W]
                                    : ep1 ? lacc[2*ACC_W +: ACC_W]
                                    : ep2 ? cacc[gm][gn]
-                                         : prod[0*ACC_W +: ACC_W];
+                                         : prod_e[0*ACC_W +: ACC_W];
                     end else if (gb == 2) begin : g_opb2
                         assign opb = ep0 ? lacc[3*ACC_W +: ACC_W]
-                                         : prod[2*ACC_W +: ACC_W];
+                                         : prod_e[2*ACC_W +: ACC_W];
                     end else begin : g_opb_plain
-                        assign opb = prod[gb*ACC_W +: ACC_W];
+                        assign opb = prod_e[gb*ACC_W +: ACC_W];
                     end
 
                     fp32_add u_add (
@@ -428,7 +577,17 @@ module amx_fp8 #(
                      COLSB, DWORDS, KDW, LANE_N);
             $finish;
         end
-        // ccnt must reach EP2. Sized from the bound rather than guessed.
+        // Checked BEFORE the CW width test below, which is derived from EP2 and so
+        // from PIPE: an out-of-range PIPE should be reported as an out-of-range
+        // PIPE, not as a counter that is mysteriously too narrow. Only 0 and 1 are
+        // built; the header says why 2 is absent rather than unimplemented.
+        if (PIPE < 0 || PIPE > 1) begin
+            $display("FATAL: PIPE must be 0..1 (got %0d)", PIPE);
+            $finish;
+        end
+        // ccnt must reach EP2. Sized from the bound rather than guessed, so it
+        // tracks PIPE automatically: EP2 is 18 at PIPE=0 and 19 at PIPE=1, both
+        // inside 5 bits.
         if ((1 << CW) <= EP2) begin
             $display("FATAL: ccnt is %0d bits, too narrow for EP2=%0d", CW, EP2);
             $finish;
