@@ -18,12 +18,16 @@
 # that matters most: refusing to emit a PPA number for RTL that has not passed
 # its regression. So a trial cannot log a row for broken hardware.
 #
-# Artifact isolation is free: nick_amx() already takes a TAG, so tag x1y1 lands
-# in work/*/amx_s1_x1y1/ and cannot collide with another trial.
+# Artifact isolation comes from the TAG: tag x1y1 lands in work/*/amx_s1_x1y1/ and
+# cannot collide with another trial. For amx_fp8 the TAG is the ONLY thing that
+# isolates it -- nick_fp8() deliberately puts no knobs in the name, so two amx_fp8
+# trials at different PIPE sharing a TAG would overwrite each other's routed
+# database and the second would be read back as the first. One TAG per trial.
 #
 # Usage:
-#   scripts/trial.sh -x 1 -y 0 -g "goal string" [-p PERIOD] [-s SAT]
-#                    [-P PIPE] [--hold-margin NS] [--dry-run]
+#   scripts/trial.sh -x 1 -y 0 -g "goal string" [-d DESIGN] [-p PERIOD] [-s SAT]
+#                    [-P PIPE] [-R RD_REG] [-u UTIL] [--hold-margin NS]
+#                    [--expect-flops N] [--dry-run] [--log-only]
 #=============================================================================
 set -euo pipefail
 
@@ -84,19 +88,69 @@ mkdir -p "$HERE/experiments"
 
 # shellcheck source=scripts/nick.sh
 source "$HERE/scripts/nick.sh"
+# Everything that differs per design is decided ONCE, here, the same way
+# measure.sh does it: the artifact nick, the RTL files the fingerprint has to
+# cover, and which knobs are real for this design.
+#
+# The file list is a SECOND copy of measure.sh's RTL_LIST and there is no way to
+# share it without a fifth file, so the existence check below is what stops the
+# two from drifting silently.
 case "$DESIGN" in
-  amx_tdpbssd) NICK="$(nick_amx "$SAT" "$TAG")" ;;
-  *) echo "FATAL: trial.sh currently targets amx_tdpbssd only" >&2; exit 2 ;;
+  amx_tdpbssd)
+    NICK="$(nick_amx "$SAT" "$TAG")"
+    RTL_FILES=("$HERE/rtl/amx_tdpbssd.v")
+    KNOBS="SAT=$SAT PIPE=$PIPE RD_REG=$RDREG"
+    ;;
+  amx_fp8)
+    NICK="$(nick_fp8 "$TAG")"
+    # THREE files, and the fingerprint below covers all three. amx_fp8.v
+    # instantiates fp8_mul and fp32_add ~1000 times each, so a sha over
+    # amx_fp8.v alone would report a trial that retimed fp32_add.v as having the
+    # same RTL as the row before it -- and a row that is not attributable to
+    # exact bytes cannot be compared with anything.
+    RTL_FILES=("$HERE/rtl/amx_fp8.v" "$HERE/rtl/fp8_mul.v" "$HERE/rtl/fp32_add.v")
+    # No SAT: this design has no saturation parameter. Printing SAT=1 beside it
+    # would be a banner describing a knob the hardware does not have.
+    KNOBS="PIPE=$PIPE RD_REG=$RDREG"
+    ;;
+  *) echo "FATAL: trial.sh has no nick and no RTL file list for design '$DESIGN'." >&2
+     echo "       Supported: amx_tdpbssd, amx_fp8. Add a case rather than" >&2
+     echo "       letting a trial log a row it cannot fingerprint." >&2
+     exit 2 ;;
 esac
 
 # Identify the RTL by content, not by branch state: a trial has to stay
-# attributable to exact bytes after the tree moves on.
-RTL_SHA=$(shasum -a 256 "$HERE/rtl/$DESIGN.v" | cut -c1-16)
+# attributable to exact bytes after the tree moves on. A missing file would make
+# the fingerprint cover less than it claims to, so it is fatal, not a warning.
+for f in "${RTL_FILES[@]}"; do
+  [[ -f "$f" ]] || { echo "FATAL: $DESIGN's RTL list names a file that does not exist:" >&2
+                     echo "       $f" >&2
+                     echo "       trial.sh's list has drifted from the tree (or from" >&2
+                     echo "       measure.sh's RTL_LIST). Fix it before logging a row." >&2
+                     exit 2; }
+done
+# shasum is the perl script macOS ships; sha256sum is coreutils and is what this
+# Linux box has. Only one may exist, and falling back to `|| true` would log an
+# EMPTY sha -- an unattributable row that looks perfectly fine in the log.
+if command -v sha256sum >/dev/null; then SHA_CMD=(sha256sum)
+elif command -v shasum >/dev/null; then SHA_CMD=(shasum -a 256)
+else
+  echo "FATAL: neither sha256sum nor shasum found -- cannot fingerprint the RTL," >&2
+  echo "       and a trial with no fingerprint is not attributable to any bytes." >&2
+  exit 1
+fi
+# Hashed as ONE CONCATENATED BYTE STREAM, not `sha256sum f1 f2 f3`: the per-file
+# form embeds pathnames, which are absolute here, so the digest would change when
+# the repo is cloned to another directory and every past row would stop matching.
+# Streaming the bytes also leaves the single-file digest bit-identical to the old
+# `shasum -a 256 <one file>` value, so the amx_tdpbssd shas already in
+# trials.jsonl stay comparable across this change.
+RTL_SHA=$(cat "${RTL_FILES[@]}" | "${SHA_CMD[@]}" | cut -c1-16)
 GIT_SHA=$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DIRTY=$(git -C "$HERE" status --porcelain 2>/dev/null | head -1)
 
 echo "=============================================================="
-echo " TRIAL X${X}-Y${Y}   $DESIGN   SAT=$SAT PIPE=$PIPE RD_REG=$RDREG"
+echo " TRIAL X${X}-Y${Y}   $DESIGN   $KNOBS"
 echo " period ${PERIOD}ns  util ${UTIL}%${HOLD_MARGIN:+  hold_margin ${HOLD_MARGIN}ns}"
 echo " rtl sha256[0:16] $RTL_SHA   git $GIT_SHA${DIRTY:+ (dirty)}"
 echo " goal: $GOAL"
