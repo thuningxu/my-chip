@@ -11,8 +11,8 @@ Ten files, four designs, and a deliberate independence structure:
 | `tb_tpu_mmu.v` | the `tpu_mmu` systolic regression — 12 cases plus a cross-language tie |
 | `tpu_golden.py` | the systolic **schedule proof** — a cycle-accurate model that threads the output row index through the array and asserts every contribution to one accumulator came from the same row |
 | `tb_fp32_add.v` | the FP32 adder, **alone**: 121,376 checks. Runs *before* the array regression on purpose |
-| `tb_fp8_mul.v` | the fp8 multiplier, **exhaustively**: all 4 format pairs × 256 × 256 = 262,144 cases |
-| `tb_amx_fp8.v` | the `amx_fp8` array regression — 28 cases × `RD_REG` 0/1, all four instructions |
+| `tb_fp8_mul.v` | the fp8 multiplier, **exhaustively**: all 4 format pairs × 256 × 256 = 262,144 cases, 262,162 checks |
+| `tb_amx_fp8.v` | the `amx_fp8` array regression — **29 cases** × `RD_REG` 0/1 × `PIPE` 0/1, all four instructions. The 29th is **O1**, the only one that catches a permuted k-sequence by construction rather than by rounding luck |
 | `fp8_golden.py` | **two** independent FP32 adders plus an exact rational yardstick, and the one number that quantifies what the ISA does not say |
 
 `tpu_golden.py` splits its models by **kind, not language**, and the reason is the
@@ -45,9 +45,22 @@ bug. So the leaves are proven first and in isolation:
 
 | gate | what it establishes |
 |---|---|
-| `tb_fp8_mul.v` | **the entire input space.** 4 format pairs × 256 × 256, against a model that takes a longer route (24×24 significand multiply, not the DUT's 4×4), four checksums tied to `fp8_golden.py`, and every product shown to be **exact** |
+| `tb_fp8_mul.v` | **the entire input space.** 4 format pairs × 256 × 256, against a model that takes a longer route (24×24 significand multiply, not the DUT's 4×4), four checksums tied to `fp8_golden.py`, every product shown to be **exact**, and `y[15:0] == 0` on all 262,144 — 262,162 checks in total |
 | `tb_fp32_add.v` | RNE ties at both parities, the alignment cap, deep cancellation, DAZ, the FTZ boundary at `e=0/1/2`, the full Inf/NaN matrix, and **commutativity on every single vector** — which is what catches a broken magnitude swap |
 | `tb_amx_fp8.v` | only then the array: VNNI interleave, k schedule, lane→accumulator mapping, epilogue order, cycle count, format plumbing |
+
+`tb_fp8_mul.v`'s **`y[15:0] == 0`** assertion is there for a different file. At
+`PIPE=1`, `rtl/amx_fp8.v` registers only `prod[31:16]` and re-supplies `16'b0` on
+the far side, which halves that cut from 32,768 flops to 16,384. The
+justification is that `fp8_mul` returns `{sgn, e_fld, nrm[6:0], 16'd0}` — a
+product of two 4-bit significands has exactly 7 fraction bits — and that every
+special it can return (`0x7FC00000`, Inf, signed zero) also has zero low bits.
+Reading the RTL and believing that is not the same as checking it on all 262,144
+inputs, so it is checked, **on the DUT's output rather than the model's**: it is
+the RTL that has to have zero low bits, not a model that agrees with it. If it
+ever fails, the register in `rtl/amx_fp8.v` is silently dropping product bits — a
+wrong answer in the array with nothing wrong in the multiplier — and the check
+names that file in its failure message for exactly that reason.
 
 Because the leaves are proven, `tb_amx_fp8.v` uses **them** as its oracle — one
 `fp8_dec` pair, one `fp8_mul`, one `fp32_add`, instantiated outside the DUT and
@@ -122,7 +135,9 @@ make sim-all          # N = 4, 8, 16
 make sim OUTPAR=1     # parallel readout
 make sim-amx          # amx_tdpbssd, SAT=1
 make sim-amx SAT=0    # ...and bit-exact Intel wrapping
-make sim-matrix       # BOTH designs, every parameter state -- 14 configs
+make sim-fp8          # amx_fp8, PIPE=0
+make sim-fp8 PIPE=1   # ...and with the product registered
+make sim-matrix       # ALL FOUR designs, every parameter state -- 34 configs
 make golden           # both Python references
 ```
 
@@ -198,8 +213,8 @@ not a gap in coverage.
 
 ### The AMX suite, mutation-tested the same way
 
-Four mutations were injected into `rtl/amx_tdpbssd.v`, and the results are worth
-keeping because two of them are instructive:
+Six mutations were injected into `rtl/amx_tdpbssd.v`, and the results are worth
+keeping because three of them are instructive:
 
 | mutation | `SAT=0` | `SAT=1` | caught by |
 |---|---|---|---|
@@ -207,6 +222,8 @@ keeping because two of them are instructive:
 | transpose the accumulator index | 5 fail | 5 fail | T3, T5, S5, C1 |
 | read A's byte lanes unsigned | 6 fail | 7 fail | T3, T4, T5, S5 |
 | `ovf = raw[32]`, dropping `^ raw[31]` | **survives** | 7 fail | S2, S4, T3, T5 |
+| `acc_en` delayed one cycle too far | **survives** | 2 fail | **S6 only** |
+| accumulate gated on `run`, not `acc_en` | 14 fail | 12 fail | nearly everything |
 
 1. **T1, T2 and T4 all pass the byte-reversal mutant.** Uniform tiles cannot
    detect a reordering, and T4's pattern is period-2 in `b` so its four-byte sum
@@ -220,6 +237,64 @@ keeping because two of them are instructive:
    logic that the parameter prunes. A mutation in pruned hardware has nothing to
    detect — and a suite that "caught" it would be reporting on a signal the
    netlist does not contain.
+
+3. **`acc_en` one cycle late is caught by S6 and by nothing else.** It does not
+   drop a `k` — it *permutes* the sequence — and INT32 addition with a clamp in it
+   is not associative, so order is part of the specification. S6 was added
+   because that mutation survived everything else: `sum4` is `+4` for `k=0..7`
+   then `−4` for `k=8..15`, with C starting 10 below the rail, so a correct
+   machine clamps partway through, walks back down, and lands on `INT32_MAX−32`;
+   rotating `k` by one lands on `−28`. **No other case in the suite could see
+   it.** This is the lesson `amx_fp8`'s O1 exists to reuse.
+
+### The FP8 suite: 18 of 29 checks are blind to a permuted k
+
+Same mutation, same lesson, one design later. `rtl/amx_fp8.v`'s `kcnt` was
+rotated one step — `kcnt = ccnt[3:0] + 1`, so the order becomes `1..15,0` with no
+`k` dropped or duplicated. A **pure permutation** is the only mutation that
+isolates order from count, and FP32 addition is not associative, so the per-lane
+k-sequence `0..15` is part of the specification:
+
+| checks | `PIPE=0` | `PIPE=1` |
+|---|---|---|
+| **O1** | **256/256 elements wrong** | **256/256 wrong** |
+| T3a/T3b/T3c/T3d | 31 / 25 / 47 / 24 | same |
+| T4, T5 | 27, 36 | same |
+| C1–C4 | 31, 21, 24, 24 | same |
+| E1–E4, S1–S4, D1, D2, Z1, T1, T2 | **SURVIVE** | **SURVIVE** |
+| | 18 pass, 11 fail | 18 pass, 11 fail |
+
+Read that table the right way round. **The 18 survivors are blind by
+construction, not by accident:** E1–E4 and S1–S3 give every `k` the *same*
+product, so permuting equal values is undetectable rather than merely
+undetected; T1 and S4 use an identity B, so exactly one `k` per lane is non-zero;
+T2, D1, D2 and Z1 produce only zeros or only NaNs, and a `+0` accumulator absorbs
+those in any order. The ten that do fail fail on 21 to 47 of 256 elements — 8% to
+18% — by **rounding luck**, which would evaporate the next time `fill_asym`'s
+stride constants moved. Only O1 fails by construction, and it fails on all 256.
+
+O1's mechanism, per lane: `2^24` at `k=0`, then `1.0` for `k=1..15`, both
+reachable in E5M2 (`4096.0 = 0x6C` squared is `2^24`; `1.0 = 0x3C` squared is
+`1.0`). The ulp at `2^24` is 2, so **in order** every `1.0` vanishes — `2^24 + 1`
+is an exact tie between `2^24` and `2^24+2`, and RNE takes the even significand,
+which is `2^24` itself, every single time — giving `0x4B800000`. **Permuted** to
+`1..15,0`, the fifteen ones sum to `15.0` first and then *survive*: `2^24 + 15`
+ties between `2^24+14` (odd) and `2^24+16` (even), so RNE rounds up. `0x4B800008`.
+One ulp apart per lane, and the balanced-tree epilogue preserves the difference
+exactly, so C comes back `0x4C800000` against `0x4C800008`. Nothing is hardcoded:
+the expectation comes from `model_c` like every other case, because O1's
+contribution is the **stimulus** and the oracle stays the single source of truth.
+
+`PIPE=1` is what earns this case now. It makes the accumulate enable's *timing*
+load-bearing — `acc_phase` becomes `v_sr` rather than `sel_valid` — which is
+precisely the class of bug that S6 caught in `amx_tdpbssd` and that `amx_fp8` had
+no case for. One caveat before trusting the obvious mutant here: `amx_fp8` has an
+epilogue, so delaying `acc_phase` a second time at `PIPE=1` puts the 16th pulse on
+`EP0`, where `ep0` has already taken operand B of lanes 0 and 2. That mutation
+**drops** `k` for those lanes instead of permuting them, and it is loud — 22 of 29
+checks fail, O1 reading `0x42700000` (60.0, the fifteen ones tree-summed) against
+`0x4C800000`. It is the `kcnt` rotation above that proves O1 has teeth, because
+that one changes order and nothing else.
 
 ## Adding a case
 

@@ -5,7 +5,7 @@
 | `mac_array.v` | INT4 outer-product MAC array — the **v0 baseline**, deliberately the simplest *correct* design so there is somewhere to climb from | 16 multipliers at N=4 |
 | `amx_tdpbssd.v` | **Intel AMX `TDPBSSD`** — INT8 tile dot-product, `C += A@B`, with optional INT32 saturation | 1024 multipliers, 16 cycles |
 | `tpu_mmu.v` | **TPU v1-style weight-stationary systolic array** — `C += A@W`, N×N INT8, weights resident in the PEs, accumulators outside the array | 1024 multipliers at `N=32`, 3N cycles |
-| `amx_fp8.v` | **Intel AMX-FP8** (Diamond Rapids) — all four mix-and-match variants in one netlist, `op[1:0]` at runtime. fp8 in, **IEEE FP32 accumulate** | 1024 multipliers + 1024 FP32 adders, 20 cycles |
+| `amx_fp8.v` | **Intel AMX-FP8** (Diamond Rapids) — all four mix-and-match variants in one netlist, `op[1:0]` at runtime. fp8 in, **IEEE FP32 accumulate** | 1024 multipliers + 1024 FP32 adders, `20 + PIPE` cycles |
 | `fp8_mul.v` | `fp8_dec` (E5M2/E4M3 → a common 4-bit significand, DAZ) + `fp8_mul` (exact 4×4 product into FP32). Leaf blocks of `amx_fp8` | 146 cells; 1024 instances |
 | `fp32_add.v` | IEEE binary32 adder — RNE, DAZ in, FTZ out, Inf/NaN. **1198 cells, ~6.2 ns, and it sits inside a feedback loop 1024 times over** | the design's frequency floor |
 
@@ -25,7 +25,7 @@ comparable at all. Read the columns as two separate experiments:
 | accumulator | **inside** the cell, so its feedback loop cannot be pipelined at any depth | **outside** the array, so the array is pure feed-forward and the only feedback is one adder | four **FP32** accumulators per cell, in the cell |
 | arithmetic | INT8 × INT8 → INT32, exact | INT8 × INT8 → INT32, exact | fp8 × fp8 (exact) → **64 rounded IEEE FP32 adds** |
 | a unit is | 4 multipliers + a 3-level tree + a saturating fold, all in the loop | 1 multiplier + 1 adder + 1 flop | 1 multiplier (4×4!) + **1 full FP32 adder**, in the loop |
-| cycles / operation | 17 + `PIPE` | 3N (fill and drain are 2N−2 of it) | 20 (16 accumulate + 3 epilogue + 1) |
+| cycles / operation | 17 + `PIPE` | 3N (fill and drain are 2N−2 of it) | 20 + `PIPE` (16 accumulate + 3 epilogue + 1) |
 
 `tpu_mmu` vs `amx_tdpbssd` moves **two** variables at once — operand delivery
 *and* accumulator placement — so its result cannot be attributed to either. That
@@ -254,3 +254,110 @@ clamp sits there and nowhere else.
   lesson as `mac_array`.
 - **Tile geometry is `localparam`, not `parameter`.** Changing it does not give a
   smaller TDPBSSD, it gives a different instruction.
+
+---
+
+# amx_fp8 — Intel AMX-FP8
+
+## Parameters
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `PIPE` | 0 | **0..1**, asserted at elaboration. `1` registers the fp8 product at the FP32 adder's input. Latency becomes `20 + PIPE` cycles; **throughput is unchanged** at one k-step per cycle |
+| `RD_REG` | 1 | registers `rd_data`, one extra cycle of *readback* latency. Defaulted on because both prior designs measured the same thing: a multi-level readback mux driving an output port becomes the critical path, and half of its arrival is clock insertion delay that cannot cancel, because a port has no capture flop to offset it |
+
+Both change the hardware, so `make sim-matrix` builds all four combinations —
+a parameter only ever shipped in one state is dead code with a name.
+
+**The product register is 16 bits per lane, not 32.** `fp8_mul` returns
+`{sgn, e_fld, nrm[6:0], 16'd0}`, because a product of two 4-bit significands has
+exactly 7 fraction bits, and every non-normal it can return — QNAN `0x7FC00000`,
+Inf, signed zero — also has zero low bits. So `PIPE=1` registers `prod[31:16]`
+and re-supplies `16'b0` on the far side: **16,384 flops, not 32,768.** That is a
+proof obligation, not an argument, and `tb/tb_fp8_mul.v` discharges it by
+asserting `y[15:0] == 0` on all 262,144 inputs.
+
+Flop counts, both from yosys:
+
+| | flip-flops | |
+|---|---|---|
+| `PIPE=0` | **57,867** | identical to the pre-parameter RTL — same cell histogram too, 26 cell types and 116,911 cells, so the parameter costs nothing when off |
+| `PIPE=1` | **74,252** | +16,385: the 16,384 product bits plus `v_sr`, the enable shift register |
+
+## The measured critical path
+
+nangate45, 4.00 ns target, `RD_REG=1`, hold margin 0.05, both `reg->reg`
+limited, both DRC 0:
+
+| | `PIPE=0` | `PIPE=1` |
+|---|---|---|
+| setup WS | −1.6654 | −0.7041 |
+| implied period | 5.6654 ns | 4.7041 ns |
+| `reg->reg` fmax | 176.5 MHz | **212.6 MHz** (+20.5%) |
+| cycles | 20 | 21 |
+| throughput | 144.6 GMAC/s | **165.9 GMAC/s** (+14.7%) |
+| flip-flops | 57,867 | 74,252 |
+| stdcells | 3,974,058 | 3,454,124 |
+| area µm² | 4,745,090 | 4,361,340 |
+| power W | 40.2251 | 14.0894 |
+| hold WS | +0.0423 | +0.0454 |
+
+The extra cycle is real and is why the throughput gain (+14.7%) is smaller than
+the frequency gain (+20.5%) — `PIPE` buys clock by spending a cycle, and both
+numbers have to be shown.
+
+That `PIPE=1` is **8.1% smaller while holding 16,385 more flops** is not the
+register paying for itself, and the cell classes say so exactly:
+`timing_repair_buffer` falls 1,141,280 → 631,196 µm², a **−510,084** saving that
+*exceeds* the −383,750 total, with `sequential_cell` +74,094 for the new flops and
++52,254 elsewhere balancing it. `PIPE=0` misses its target by 1.6654 ns and
+`PIPE=1` by 0.7041, so the area is what the tool spends chasing a target it cannot
+reach — X1-Y0's "the same cells" finding, in an RTL change rather than a target
+change.
+
+**Power is a separate question and this pair does not settle it.** −65% power
+against −10.8% area is out of proportion to the buffers removed, so glitch
+truncation — one register stopping 1024 multiplier outputs from toggling through
+1024 FP32 adders, which X1 measured as −94.8% at equal target — plausibly accounts
+for the remainder. The two effects are not separated here. Do not quote either
+mechanism as *the* cause of the power figure.
+
+**Both settings launch from `ccnt[2]` — a control counter, not the
+accumulator** — and both end at a lane accumulator (`PIPE=0` at
+`g_m[12].g_n[4].lacc[71]`, lane 2; `PIPE=1` at `g_m[14].g_n[12].lacc[5]`,
+lane 0). Routed with parasitics, the delay attributed by region:
+
+| region | `PIPE=0` | `PIPE=1` |
+|---|---|---|
+| `ccnt` fanout + operand/epilogue muxes | 0.952 ns | 1.087 ns |
+| `fp8_mul` | 1.006 ns | **0 — registered out** |
+| `fp32_add` | 3.299 ns | 3.315 ns |
+| **data path from Q** | **5.257 ns** | **4.402 ns** |
+
+Read that as an attribution, not a summary: `PIPE=1` removed the multiplier from
+the critical path and **nothing else**. The adder is unchanged at 3.3 ns, and the
+control region got 0.135 ns *worse*.
+
+**The accumulate loop `lacc -> fp32_add -> lacc` has never been the limiter at
+either setting.** The binding path is feed-forward, from `ccnt` through the
+operand and epilogue muxes into an adder whose output happens to land in a
+register that also feeds it back. So the next move is **registering the control
+that `ccnt` drives** — 1.087 ns of the remaining 4.402 ns — and not more datapath
+pipelining. Pipelining `fp32_add` is the move *after* that: it needs interleaved
+accumulators, because the adder is otherwise in a one-cycle loop.
+
+That is not a contradiction of the table at the top of this file calling
+`fp32_add` the design's frequency floor. It is a floor **not yet reached**. The
+loop measures 3.306 ns of logic routed, so with register overhead it binds at
+**3.692 ns / 270.9 MHz** — against a measured period of 4.7041 ns. That is
+1.012 ns of period still to win, and the control region holds 1.087 ns of it. The
+two nearly cancel, which is the useful part: take the control path out and the
+adder becomes the thing you are arguing with, at which point the argument needs
+interleaved accumulators rather than another register.
+
+Reproduce either row with:
+
+```bash
+scripts/report_path.sh -d amx_fp8            # the PIPE=0 build
+scripts/report_path.sh -d amx_fp8 -t x5y1    # the PIPE=1 build
+```

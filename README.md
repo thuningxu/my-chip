@@ -274,6 +274,26 @@ comparing rows in `EXPERIMENTS.md` against each other. They are not silicon
 predictions, and they are not comparable to a production accelerator on a modern
 node.
 
-Current state: **v0 baseline measured at N=4 and N=16, both DRC-clean, neither
-meeting 1.00 ns.** See `EXPERIMENTS.md` for the rows and `rtl/README.md` for the
-measured critical path.
+## Current state
+
+All four designs are routed and DRC-clean. Frequencies are `reg→reg` — the only
+kind this project compares, because a path ending at an output port is measuring the
+SDC's pad convention rather than the hardware.
+
+| design | best measured | notes |
+|---|---|---|
+| `mac_array` | 783 MHz at N=4, 748 at N=16 | v0 baseline. Setup not met at 1.00 ns; multiply and a 24-bit add share a cycle |
+| `amx_tdpbssd` | **698.9 MHz / 2.436 W** at `PIPE=3 RD_REG=1` | X1–X4 **closed**. Limited by a multiplier carry-propagate at ~703 MHz; 1.40 ns is the knee, past which power is the cost and frequency is not the return |
+| `tpu_mmu` | 3N cycles at `TN=32` | one row, systolic-vs-broadcast at matched multiplier count. **Hold is violated — not signoff-clean**, `--hold-margin` was omitted |
+| `amx_fp8` | **212.6 MHz / 14.09 W** at `PIPE=1 RD_REG=1` | X5 **open**. `PIPE=1` bought +14.7% throughput and −65% power, and falsified X5's own floor: the limiter is a control path from `ccnt`, not the accumulate loop |
+
+The headline comparison the project exists to make: **bit-exact IEEE FP32
+accumulation costs 3.45× the throughput and 6.49× the cells of INT32 accumulation**
+at identical MAC count and operand delivery — down from 3.99× and 7.48× before
+`PIPE=1`. Cycle counts now differ (21 vs 20), so the throughput ratio is no longer
+the frequency ratio; see the correction in `EXPERIMENTS.md`.
+
+Two campaigns of reasoning are logged separately from the rows:
+`experiments/harness.md` declares each generation *before* its trials run, and
+`experiments/RESULTS.md` tabulates them. `rtl/README.md` carries the measured
+critical paths.
