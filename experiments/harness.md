@@ -24,8 +24,18 @@ Each X below therefore declares what it reads, what it blames, what it proposes,
 and — importantly — **what it cannot reach**, so that a plateau is interpretable
 rather than merely disappointing.
 
-Target design: `amx_tdpbssd` (Intel AMX `TDPBSSD`, INT8, 1024 multipliers).
+Target designs, in order: **X1–X4** climbed `amx_tdpbssd` (Intel AMX `TDPBSSD`,
+INT8, 1024 multipliers) and closed at X4. **X5 onward** targets `amx_fp8` (Intel
+AMX-FP8, fp8 in, IEEE FP32 accumulate, 1024 multipliers and 1024 FP32 adders). The
+target is named again in each generation, because a generation that does not say
+what it is climbing cannot be checked against the row it produced.
+
 Harness: Claude Code only. One agent runs both loops.
+
+`scripts/trials.py` keeps the two designs' grids and ladders apart. A delta between
+two designs is a number with no referent — an `amx_fp8` `PIPE=1` row ranked against
+an `amx_tdpbssd` `PIPE=1` row shares a knob name and nothing else — and the X axis
+does not save you, since nothing stops two designs reusing an X number.
 
 ---
 
@@ -866,3 +876,271 @@ Pareto move, and nothing in X1 through X3 would ever have surfaced this.
 Note the 19 W figure also means `PIPE=0` was never a viable configuration on any
 axis — it is 6.2× the power of the 698.9 MHz operating point while being half its
 speed. The pipelining ladder's real justification was never the +99.6% frequency.
+
+---
+
+## X5 — "the adder is the floor, and everything ahead of it is one register away"
+
+**The target design changes here.** X1–X4 climbed `amx_tdpbssd` and that campaign is
+closed. X5 targets **`amx_fp8`**, whose baseline is row **p1** in `EXPERIMENTS.md`:
+`RD_REG=1`, 4.00 ns target, setup WS **−1.7128**, reg→reg **175.0 MHz**, 57,867
+flops, 3,985,240 stdcells, 40.35 W, DRC 0, hold **+0.0448** met.
+
+Declared before any trial runs, as the protocol requires.
+
+### Reports read
+
+Unchanged from X4 in *what* is trusted — `6_report.json` for every PPA figure,
+`sta_limiter.sh` for the limiter class, `report_path.sh` for path shape,
+`5_route_drc.rpt` for DRC — with **one deliberate addition**:
+
+| report | for |
+|---|---|
+| `finish__power__total` | **ranked, not a footnote.** X4's closing finding was a 19.2× power win at constant frequency that X1–X3 could not see, because a hillclimb that ranks on one scalar cannot see a Pareto move. This generation registers a signal ahead of 1024 FP32 adders, which is structurally the same glitch-truncation that produced that win, so power is a column the ladder is ranked on |
+
+### Bottleneck blamed
+
+p1's routed worst path launches from `ccnt` and ends at `g_m[1].g_n[13].lacc[49]`,
+113 gate levels, and its segments are measured rather than inferred:
+
+```
+ccnt --> operand mux 0.864 --> fp8_mul 1.157 --> fp32_add 3.306 --> lacc  (0.046 tail)
+         \_______________ 2.021 ns feed-forward, 38% _______________/
+```
+
+The accumulate loop is only the 3.306 ns adder. **2.021 ns of a 5.373 ns data path
+is feed-forward logic sitting in front of a loop it does not belong to.** p1's own
+write-up predicted no feed-forward register could help and was wrong about that;
+this generation is the consequence.
+
+### Fix family
+
+**Register the product**, expressed as a cumulative `PIPE` parameter so every depth
+stays buildable and testable — the same ladder shape `amx_tdpbssd` uses, and for the
+same reason.
+
+**The register is 16 bits per lane, not 32.** `fp8_mul` builds
+`normal_y = {sgn, e_fld, nrm[6:0], 16'd0}`, and every special value it can return
+(`0x7FC00000`, `{sgn,8'hFF,23'd0}`, `{sgn,31'd0}`) also has zero low bits: a product
+of two 4-bit significands has exactly 7 fraction bits, which is the RTL's own stated
+reason the product never rounds. So `y[15:0] == 0` for all 4×256×256 inputs, the cut
+costs **16,384 flops (+28.3%)** rather than 32,768 (+57%), and `tb_fp8_mul` is
+extended to **assert** that exhaustively rather than leaving it as an argument.
+
+### Harness-level knobs, held constant across all Y in X5
+
+| knob | value | why |
+|---|---|---|
+| `PERIOD` | **4.00 ns** | p1's value, kept so Y0 → Y1 is one variable. Note this *violates* X1's "set the target from measured slack" heuristic on purpose: p1 needs 5.713 ns, so PIPE=0 is measured against a target it cannot reach. That is what makes its TNS −60,409 readable as a real wall, and it is also why Y1 is expected to saturate — see the Y ladder |
+| `HOLD_SLACK_MARGIN` | **0.05 ns** | what p1 used. Hold was clean at +0.0448 with 49,454 hold buffers, so this is a knob that is already known to work on this design |
+
+### What X5 CANNOT reach — declared now so a plateau is interpretable
+
+**The loop.** `lacc → fp32_add → lacc` is 3.306 ns routed and no feed-forward
+register shortens it. p1's own numbers price the floor exactly: its implied period
+of 5.7128 ns exceeds its 5.373 ns data path by **0.340 ns**, which is the launch
+flop's CLK→Q plus setup plus the SDC's 0.1 ns uncertainty, less useful skew. That
+overhead is paid by any register, so
+
+```
+floor = 0.340 + 3.306 + 0.046 = 3.692 ns  ->  270.9 MHz
+```
+
+**This corrects p1's own projection.** p1 wrote "putting the design near ~3.5 ns /
+~285 MHz"; that figure omits the pipeline register's overhead, which p1 had already
+measured. The reachable number is ~271 MHz, not ~285.
+
+X5 also cannot touch **wire delay** on a 3065 × 3065 µm die, and cannot touch the
+**epilogue's** three cycles or its balanced-tree order.
+
+### Prediction, stated to be falsifiable
+
+1. **Y1 lands at the floor, not short of it.** After the cut the feed-forward path is
+   `0.340 + 2.021 = 2.361 ns` → 423.6 MHz, so it stops being the limiter by a wide
+   margin and the adder loop binds. Expect **3.6–3.8 ns, ~263–278 MHz, +50% to +59%**
+   over 175.0. A result materially *above* 278 MHz means the adder segment itself
+   moved under re-placement and the loop was never as measured.
+2. **Flops: 57,867 → 74,252**, +16,385. Asserted by `trial.sh --expect-flops`,
+   not logged beside the result.
+
+   Corrected from 74,251 **before any trial ran**, and the correction is itself
+   worth recording because it is the same class of error X1 made: 16,384 is the
+   product register, and the +1 is `v_sr`, the enable shift register this
+   generation's own fix family requires. I predicted the datapath and forgot the
+   control. Measured by yosys RTL flop inference at both settings —
+   **PIPE=0 = 57,867 exactly**, which is the figure p1 predicted and hit, so
+   `opt_clean` prunes `v_sr` at PIPE=0 and X5's "the parameter is free at PIPE=0"
+   holds precisely rather than approximately.
+3. **Cycles 20 → 21.** Latency, not throughput: one k-step per cycle either way.
+4. **A further rung is worthless.** Registering the decoded operands too (PIPE=2)
+   would split a 2.361 ns path that is already 1.33 ns clear of the binding loop. If
+   Y1's limiter comes back `reg→reg` inside the adder, X5 is closed by that fact and
+   the next generation must pipeline `fp32_add` itself — which needs interleaved
+   accumulators, because the adder is otherwise in a one-cycle loop.
+5. **Power should fall substantially** at constant frequency, by the X4 mechanism:
+   1024 multiplier outputs currently glitch straight into 1024 FP32 adders every
+   cycle. No number is predicted, because p1's 40.35 W is not credible in absolute
+   terms and this log's rows span 19.0 W to 0.99 W for one design at one target.
+
+### The one thing every Y must not break
+
+**FP32 addition is not associative**, so per-lane k-order `0..15` *is* the
+specification, exactly as the saturating fold's per-k-step boundary was in X1. Two
+distinct orderings are load-bearing here, not one:
+
+1. the k-sequence into each `lacc[b]`, and
+2. the **balanced-tree epilogue** (`lacc0+=lacc1`, `lacc2+=lacc3`, then
+   `lacc0+=lacc2`), which `EXPERIMENTS.md` records as genuinely unresolved in the
+   sources and which differs from a sequential chain on **23.05%** of output elements.
+
+The delay must therefore be an order-preserving shift register on the *enable*, never
+a re-derivation from the counter, and the epilogue must not begin until the last
+accumulate has landed — `EP0 = KDW + PIPE`, not `KDW`.
+
+X1's mutation table is the warning that matters: delaying `acc_en` by one cycle
+*permutes* k rather than dropping it, every uniform-operand case is blind to that by
+construction, and in `amx_tdpbssd` only the purpose-built S6 caught it. `tb_amx_fp8`
+has **no equivalent case today**, so one is added — varying contributions where FP32
+rounding can see a permutation — and the mutant is run to prove the suite catches it
+*before* any trial is logged.
+
+### Y ladder
+
+| Y | `PIPE` | change | cycles | flops |
+|---|---|---|---|---|
+| Y0 | 0 | **no functional change.** Re-baseline p1's configuration on this machine, on the *same RTL bytes* Y1 uses, so Y0 → Y1 differs in one parameter and nothing else | 20 | 57,867 |
+| Y1 | 1 | register the 16 significant bits of each `prod`, moving the mux and the multiply out of the accumulate path | 21 | 74,252 |
+
+**Y0 is mandatory and is not a comparison against p1.** The platform changed — p1 was
+measured on macOS/arm64, this machine is Linux/x86_64 with gcc 11.5 — and the
+calibration run recorded in `EXPERIMENTS.md`'s Environment section shows the platform
+alone moves stdcells and power. Y0 also proves the `PIPE` parameter is free at
+PIPE=0: its flop count must be 57,867, the figure p1 predicted and hit exactly.
+
+**Y1 is expected to SATURATE at this target and its reported fmax to be a lower
+bound.** If Y1 needs ~3.69 ns it will close at 4.00 with roughly +0.3 ns of slack,
+and the optimiser stops once it meets the target — the exact defect that first
+measured `amx_tdpbssd`'s PIPE=1 as worth +0.3 MHz when it was worth +54.7. So Y1 is
+also measured at **3.40 ns**, below its predicted need, to find where it actually
+stops. That second row crosses targets and is labelled as such: only the 4.00 ns pair
+is like-for-like.
+
+### X5-Y0 result — the platform, isolated before anything was claimed
+
+Y0 changed no RTL. It re-measured p1's exact configuration on the second platform,
+so that every later delta is same-platform. Against p1:
+
+| | p1 (macOS/arm64) | X5-Y0 (Linux/x86_64) | Δ |
+|---|---|---|---|
+| flip-flops | 57,867 | **57,867** | **exact** |
+| stdcells | 3,985,240 | 3,974,058 | −0.28% |
+| area µm² | 4,758,450 | 4,745,090 | −0.28% |
+| power W | 40.3523 | 40.2251 | −0.32% |
+| reg→reg fmax | 175.0 | 176.5 | +0.84% |
+| hold WS | +0.0448 | +0.0423 | both met |
+
+**The platform is not a variable for this design**, and that had to be measured
+rather than assumed — on `mac_array` the same platform change moved power 11% and
+pushed one endpoint into hold violation. Here everything agrees inside 0.32%. So p1
+and the X5 rows are comparable after all, and the caveat that hung over every
+number until this row landed is retired.
+
+Y0 also discharges the "PIPE is free at PIPE=0" claim, at two levels. Synthesis:
+57,867 flops and an **identical cell histogram** to the pre-parameter RTL (26 cell
+types, 116,911 cells). Routed: 57,867 flops again. So the parameter's control
+restructuring constant-folds exactly, and Y0 → Y1 is one variable.
+
+### X5-Y1 result — the change works, the prediction does not
+
+| | Y0 `PIPE=0` | Y1 `PIPE=1` | Δ |
+|---|---|---|---|
+| reg→reg fmax | 176.5 MHz | **212.6 MHz** | +20.5% |
+| cycles | 20 | 21 | +5% |
+| **throughput** | 144.6 GMAC/s | **165.9 GMAC/s** | **+14.7%** |
+| power | 40.2251 W | **14.0894 W** | **−65.0%** |
+| energy efficiency | 3.59 GMAC/J | **11.77 GMAC/J** | **3.28×** |
+| stdcells | 3,974,058 | 3,454,124 | −13.1% |
+| flip-flops | 57,867 | **74,252** | +28.3% |
+| TNS | −59,371.7 | −12,285.5 | 4.8× |
+
+Predictions 2, 3 and 5 held. Flops **74,252 against 74,252**, checked by
+`--expect-flops` rather than logged beside the result. Cycles 20 → 21. Power fell
+substantially, which is what prediction 5 asked for.
+
+**But the area saving is optimiser effort, not the mechanism X4 identified**, and
+this generation nearly credited it to the wrong cause. The cell-class breakdown:
+`timing_repair_buffer` 1,141,280 → 631,196 µm², a **−510,084** saving that
+*exceeds* the −383,750 total, with `sequential_cell` +74,094 for the new flops and
++52,254 elsewhere balancing it exactly. `PIPE=0` misses its target by 1.6654 ns and
+`PIPE=1` by 0.7041, so the tool buys half a million µm² of buffers for the harder
+one. That is X1-Y0's signature — "the same cells" — showing up in an RTL change
+rather than a target change, and it is a warning that the two are not
+distinguishable from a cell count alone.
+
+Power is not settled by this pair: −65.0% against −10.8% area is out of proportion
+to the buffers removed, so glitch truncation plausibly accounts for the remainder,
+and X1 measured −94.8% from this change shape at equal target. The two effects are
+**not separated here** and the row says so rather than claiming the mechanism it
+would prefer. Ranking power in the report list is still what made the effect visible.
+
+**Prediction 1 FAILED.** Declared floor 3.692 ns / 270.9 MHz, predicted Y1 would
+land on it. Measured **4.7041 ns / 212.6 MHz** — 1.012 ns short.
+
+The declared falsifier was "a result materially *above* 278 MHz means the adder
+segment itself moved under re-placement." It came in *below* the range instead, and
+the path report says the adder did not move at all: **3.299 → 3.315 ns**.
+
+| region | Y0 | Y1 |
+|---|---|---|
+| `ccnt` fanout + operand/epilogue muxes | 0.952 ns | 1.087 ns |
+| `fp8_mul` | 1.006 ns | **0 — registered out** |
+| `fp32_add` | 3.299 ns | 3.315 ns |
+| **data path from Q** | **5.257 ns** | **4.402 ns** |
+
+The register did exactly what it was built to do. The floor was wrong about **which
+path**: it assumed `pr → fp32_add → lacc`, and the worst path launches from
+**`ccnt[2]`**, spends 1.087 ns in a buffer tree and through mux *select* pins, and
+only then reaches the adder. A data-side register cannot shorten a path that arrives
+at a mux on its control input.
+
+### X5 closes, and its "CANNOT reach" section was wrong
+
+X5 declared `lacc → fp32_add → lacc` to be the floor. That loop is irreducible, and
+it is **not what binds**. All three routed runs — p1, Y0, Y1 — launch from `ccnt`, at
+both `PIPE` settings and on both platforms; only the lane moves with placement (p1
+lane 1, Y0 lane 2, Y1 lane 0). The generation was right about the arithmetic and
+wrong about the topology.
+
+Prediction 4 — that a further datapath rung is worthless — **stands, and for a
+better reason than the one given.** It was argued from headroom: 2.361 ns of
+feed-forward against a 3.692 ns loop. The real reason is that the loop was never the
+limiter, so registering more of the datapath cannot help either. `PIPE=2` is
+correctly absent from the RTL.
+
+**Why this is a Y-level failure and not an X-level one.** The rule at the top of this
+document says a single Y failing implicates the design and a whole row going flat
+implicates the harness. Y1 did not go flat — +20.5% clock, −65% power, 3.28× energy
+efficiency, and a Pareto move on every axis but flops. What failed was the
+generation's *model* of where the time goes, and X5's own report list is what caught
+it: reading the startpoint, which X1 added to the harness after `repair_timing`'s
+per-iteration WNS produced two wrong answers in a row. A generation that had only
+watched fmax would have recorded +20.5% and moved on with the wrong mental model
+intact.
+
+### What X6 must be, and it is not more of this
+
+**Register the control that `ccnt` drives.** `ep0/ep1/ep2` are decoded from `ccnt`
+and fan out to the mux in front of 1024 adders across a 3065 µm die, which is what
+the 1.087 ns buys. Registered and replicated near its consumers, the binding path
+would begin adjacent to the adder: ~0.34 ns of register overhead + ~3.32 ns of adder
++ tail ≈ **3.7 ns / ~270 MHz**, for a few hundred flops against the 16,384 this rung
+cost.
+
+Note that this is the number X5 predicted for Y1 — the floor was right about the
+*value* and wrong about which change reaches it. That is worth stating plainly rather
+than quietly reusing the figure.
+
+X6 is a **control**-pipelining generation. The fix family is different from X5's, the
+report it reads is the path startpoint rather than the segment table, and its
+declared limit is the same adder loop — this time with evidence that the loop is
+actually what is left.

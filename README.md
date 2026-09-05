@@ -14,13 +14,13 @@ Four designs live here, selected with `DESIGN=`:
 | **`mac_array`** (default) | INT4 outer-product MAC array. The v0 baseline, deliberately the simplest *correct* design. `D = init + A@B` with three init modes and two readout modes | 16 mult at N=4, 256 at N=16 |
 | **`amx_tdpbssd`** | **Intel AMX `TDPBSSD`** — INT8 tile dot-product, `C += A@B` on `(16,64)@(64,16)`, 16,384 MACs, with optional INT32 saturation | 1024 mult, 16 cycles |
 | **`tpu_mmu`** | **TPU v1-style weight-stationary systolic array** — `C += A@W`, N×N, INT8. Built at `TN=32` because 32×32 = 1024 multipliers is *exactly* `amx_tdpbssd`'s count, which makes systolic-vs-broadcast a controlled comparison rather than one across scales | 1024 mult at TN=32, 3N cycles |
-| **`amx_fp8`** | **Intel AMX-FP8** (Diamond Rapids) — all four mix-and-match variants (`TDPBF8PS`/`TDPBHF8PS`/`TDPHBF8PS`/`TDPHF8PS`) in one netlist, selected at *runtime* by `op[1:0]`. `C += A@B` on `(16,64)@(64,16)`, fp8 in, **IEEE FP32 accumulate**. Same operand delivery as `amx_tdpbssd`, so the delta is purely the arithmetic | 1024 mult + **1024 FP32 adders**, 20 cycles |
+| **`amx_fp8`** | **Intel AMX-FP8** (Diamond Rapids) — all four mix-and-match variants (`TDPBF8PS`/`TDPBHF8PS`/`TDPHBF8PS`/`TDPHF8PS`) in one netlist, selected at *runtime* by `op[1:0]`. `C += A@B` on `(16,64)@(64,16)`, fp8 in, **IEEE FP32 accumulate**. Same operand delivery as `amx_tdpbssd`, so the delta is purely the arithmetic. `PIPE=1` registers the product to get the operand mux and the multiply out of the accumulate loop | 1024 mult + **1024 FP32 adders**, 20+`PIPE` cycles |
 
 ```bash
-make sim-matrix                          # all designs, all parameter states (32)
+make sim-matrix                          # all designs, all parameter states (34)
 make measure DESIGN=amx_tdpbssd SAT=1    # synth + P&R one of them
 make measure DESIGN=tpu_mmu TN=32 RDREG=1
-make measure DESIGN=amx_fp8 RDREG=1
+make measure DESIGN=amx_fp8 RDREG=1 PIPE=1
 ```
 
 ## Prerequisites
@@ -274,6 +274,26 @@ comparing rows in `EXPERIMENTS.md` against each other. They are not silicon
 predictions, and they are not comparable to a production accelerator on a modern
 node.
 
-Current state: **v0 baseline measured at N=4 and N=16, both DRC-clean, neither
-meeting 1.00 ns.** See `EXPERIMENTS.md` for the rows and `rtl/README.md` for the
-measured critical path.
+## Current state
+
+All four designs are routed and DRC-clean. Frequencies are `reg→reg` — the only
+kind this project compares, because a path ending at an output port is measuring the
+SDC's pad convention rather than the hardware.
+
+| design | best measured | notes |
+|---|---|---|
+| `mac_array` | 783 MHz at N=4, 748 at N=16 | v0 baseline. Setup not met at 1.00 ns; multiply and a 24-bit add share a cycle |
+| `amx_tdpbssd` | **698.9 MHz / 2.436 W** at `PIPE=3 RD_REG=1` | X1–X4 **closed**. Limited by a multiplier carry-propagate at ~703 MHz; 1.40 ns is the knee, past which power is the cost and frequency is not the return |
+| `tpu_mmu` | 3N cycles at `TN=32` | one row, systolic-vs-broadcast at matched multiplier count. **Hold is violated — not signoff-clean**, `--hold-margin` was omitted |
+| `amx_fp8` | **212.6 MHz / 14.09 W** at `PIPE=1 RD_REG=1` | X5 **open**. `PIPE=1` bought +14.7% throughput and −65% power, and falsified X5's own floor: the limiter is a control path from `ccnt`, not the accumulate loop |
+
+The headline comparison the project exists to make: **bit-exact IEEE FP32
+accumulation costs 3.45× the throughput and 6.49× the cells of INT32 accumulation**
+at identical MAC count and operand delivery — down from 3.99× and 7.48× before
+`PIPE=1`. Cycle counts now differ (21 vs 20), so the throughput ratio is no longer
+the frequency ratio; see the correction in `EXPERIMENTS.md`.
+
+Two campaigns of reasoning are logged separately from the rows:
+`experiments/harness.md` declares each generation *before* its trials run, and
+`experiments/RESULTS.md` tabulates them. `rtl/README.md` carries the measured
+critical paths.

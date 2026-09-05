@@ -25,17 +25,59 @@ can't reproduce.
 
 | item | value |
 |---|---|
-| ORFS | 26Q3-1510-g6cb3f2b704 |
+| OpenROAD | 26Q3-1510-g6cb3f2b704 |
+| ORFS | `6ada18baba` — the commit whose OpenROAD submodule *is* that hash |
 | PDK | nangate45 (academic, no fab target) |
 | Corner | `NangateOpenCellLibrary_typical.lib` — **typical only, not signoff** |
-| yosys | 0.68 (Homebrew) |
+| yosys | 0.68 |
 | Simulator | Icarus Verilog 12.0 |
 | SDC convention | single clock, 20% I/O delay, **0.1 ns uncertainty**, false path on `rst_n` |
 
+The first row used to be labelled "ORFS". It is **OpenROAD's** `git describe`, not ORFS's —
+ORFS's own `26Q3` tag is only a few hundred commits back, so anyone reading
+`26Q3-1510` as an ORFS revision cannot check it out. Both are now given.
+
+### Two platforms, and what differs between them
+
+Rows **v0 … p1** were measured on macOS 26.5 / arm64 / AppleClang, yosys from
+Homebrew. Rows **X5-Y0 onward** were measured on AlmaLinux 9.6 / x86_64 / gcc 11.5,
+yosys from conda-forge, at the **identical OpenROAD commit**. The toolchain was
+pinned deliberately rather than taken from HEAD, so the platform is the only
+variable between the two sets.
+
+It was calibrated on two designs before any new row was claimed, and the answer
+differs by design:
+
+| | `mac_array` f1b | `amx_fp8` p1 |
+|---|---|---|
+| flip-flops | **exact** (455) | **exact** (57,867) |
+| stdcells | −0.17% | −0.28% |
+| area | −1.0% | −0.28% |
+| implied fmax | +1.3% | +0.84% |
+| power | **+11%** | −0.32% |
+| hold | `+0.0004, 0 viol` → `−0.0002, **1 viol**` | `+0.0448` → `+0.0423`, both met |
+
+**Structure is reproduced essentially exactly; hold and power are not.** On the
+small design the platform alone moved power 11% and pushed one endpoint into hold
+violation. On the large one everything agreed inside 0.32%. So cross-platform rows
+are comparable in structure and frequency, and should **not** be compared in hold
+or power. Within a platform there is no such caveat, and the X5 pair below is
+same-platform by construction.
+
 ## Units
 
-**There is no floating point anywhere in this project.** Every datapath is
-integer / fixed-point, so any "FLOPS" figure would be meaningless here.
+**Three of the four designs have no floating point anywhere.** `mac_array`,
+`amx_tdpbssd` and `tpu_mmu` are integer / fixed-point throughout, so a "FLOPS"
+figure would be meaningless for them and none is given.
+
+**`amx_fp8` is the exception**, and this section used to say the project had no
+floating point at all — written before that design existed. It multiplies fp8 and
+accumulates in **IEEE FP32**, so a FLOPS figure *is* meaningful for it, with one
+caveat that matters more than the number: the operations are **mixed precision**.
+One MAC is one fp8 multiply plus one FP32 add, so quoting "331.7 GFLOP/s" for row
+p3 without saying that half of those ops are 8-bit is precisely the inflated
+headline this section exists to prevent. Where a single figure is wanted for that
+design, **GMAC/s is the honest one** and is what the rows use.
 
 | Term used here | Means | Unit | Do NOT read as |
 |---|---|---|---|
@@ -57,15 +99,21 @@ same unit — an INT8 multiply costs 407 gates against 84 for INT4, measured.
 
 ## Results
 
-There are now **two designs**, and their rows are tabulated separately because
+There are now **four designs**, and their rows are tabulated separately because
 their metrics are not comparable: `mac_array` is measured in cycles for a
-runtime-variable K, `amx_tdpbssd` in cycles for one fixed-shape instruction.
+runtime-variable K, the other three in cycles for one fixed-shape instruction.
 Forcing them into one table would put a "Cycles @K=1024" number next to a design
 that has no K.
 
 - **`mac_array`** — INT4 outer-product array, `D = init + A@B`. Rows below.
 - **`amx_tdpbssd`** — Intel AMX `TDPBSSD`, INT8, `C += A@B`. See
   [amx rows](#results--amx_tdpbssd).
+- **`tpu_mmu`** — TPU v1-style weight-stationary systolic array, INT8, built at
+  `TN=32` so its multiplier count matches `amx_tdpbssd` exactly. See
+  [tpu rows](#results--tpu_mmu).
+- **`amx_fp8`** — Intel AMX-FP8, fp8 in and **IEEE FP32 accumulate**, same operand
+  delivery as `amx_tdpbssd` so the delta is purely arithmetic. See
+  [fp8 rows](#results--amx_fp8).
 
 Row ids in the `mac_array` table use two prefixes. **`v`** rows are the
 performance experiments from the plan below — each trades cycles for clock.
@@ -861,6 +909,14 @@ are all identical, and the only thing that differs is the arithmetic.
 | # | Design | Stage | Period | Setup WS | reg→reg fmax | Limiter | DRC | Hold WS | Cycles/op | stdcells | flip-flops | area µm² | power W |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | p1 | `amx_fp8` `RD_REG=1` | routed | 4.00 ns | **−1.7128** | **175.0 MHz** | `reg→reg` | **0** | **+0.0448** | 20 (sim) | 3,985,240 | 57,867 | 4,758,450 | 40.3523 |
+| p2 | `amx_fp8` `PIPE=0 RD_REG=1` — X5-Y0 | routed | 4.00 ns | **−1.6654** | **176.5 MHz** | `reg→reg` | **0** | **+0.0423** | 20 (sim) | 3,974,058 | 57,867 | 4,745,090 | 40.2251 |
+| p3 | `amx_fp8` `PIPE=1 RD_REG=1` — X5-Y1 | routed | 4.00 ns | **−0.7041** | **212.6 MHz** | `reg→reg` | **0** | **+0.0454** | 21 (sim) | 3,454,124 | 74,252 | 4,361,340 | 14.0894 |
+
+**p2 is p1's configuration re-measured on the second platform**, and it is what p3
+is compared against — not p1. **p3 is the one experiment**, `PIPE` 0→1, at p2's
+target and knobs. See [X5](experiments/harness.md#x5--the-adder-is-the-floor-and-everything-ahead-of-it-is-one-register-away) for the generation that
+declared it and [the X5 findings](#x5-findings--registering-the-product-and-a-floor-that-was-not-the-ceiling)
+below for what it measured.
 
 Setup is NOT met at 4.00 ns, and that is the informative outcome rather than a
 failure: `TNS = −60,409 ns` with four separate optimisation stages each failing to
@@ -962,7 +1018,7 @@ accumulation is indistinguishable from a schedule bug.
 |---|---|
 | `tb_fp8_mul.v` | **EXHAUSTIVE** — all 4 format pairs × 256 × 256 = 262,144 cases against an independently written 24×24 model, four checksums tied to Python, and every product proven **exact** |
 | `tb_fp32_add.v` | 121,376 checks — RNE ties at both parities, the alignment cap, deep cancellation, DAZ, the FTZ boundary at `e_fin` = 0/1/2, the full Inf/NaN matrix, commutativity on **every** vector |
-| `tb_amx_fp8.v` | 28 cases × `RD_REG` 0/1; all four instructions **bit-exact** against `tb/fp8_golden.py` |
+| `tb_amx_fp8.v` | **29** cases × `RD_REG` 0/1 × `PIPE` 0/1; all four instructions **bit-exact** against `tb/fp8_golden.py`. The 29th is **O1**, added with `PIPE` — see X5 |
 | mutation | 42 mutations; every real one caught |
 
 Four mutation survivors were investigated and proved to be **genuine no-ops**,
@@ -1046,3 +1102,176 @@ The measured breakdown says the next experiment is not a guess:
 3. **A narrow-operand accumulate adder.** The accumulate step's second operand is a
    product with only 8 significant bits; the epilogue reuse is what forces a general
    FP32 adder. Not taken here deliberately.
+
+---
+
+## X5 findings — registering the product, and a floor that was not the ceiling
+
+Generation declared in [`experiments/harness.md`](experiments/harness.md#x5--the-adder-is-the-floor-and-everything-ahead-of-it-is-one-register-away) before
+either trial ran. Rows **p2** (PIPE=0) and **p3** (PIPE=1) above; same platform,
+same 4.00 ns target, same hold margin, one parameter apart.
+
+### What it bought
+
+| | p2 `PIPE=0` | p3 `PIPE=1` | Δ |
+|---|---|---|---|
+| implied period | 5.6654 ns | 4.7041 ns | −0.961 ns |
+| reg→reg fmax | 176.5 MHz | **212.6 MHz** | +20.5% |
+| **cycles / instruction** | **20** | **21** | **+5%** |
+| **throughput** | 144.6 GMAC/s | **165.9 GMAC/s** | **+14.7%** |
+| power | 40.2251 W | **14.0894 W** | **−65.0%** |
+| **energy efficiency** | 3.59 GMAC/J | **11.77 GMAC/J** | **3.28×** |
+| stdcells | 3,974,058 | 3,454,124 | −13.1% |
+| area µm² | 4,745,090 | 4,361,340 | −8.1% |
+| flip-flops | 57,867 | 74,252 | +28.3% |
+| setup TNS | −59,371.7 | −12,285.5 | 4.8× better |
+| hold WS | +0.0423 | +0.0454 | both met |
+| DRC | 0 | 0 | both clean |
+
+**The number is +14.7%, not +20.5%.** `PIPE` buys clock with a cycle — 20 → 21 —
+and Rule 3 exists so that a clock gain is never quoted as a throughput gain.
+
+**The area saving is optimiser effort, and it was nearly credited to the wrong
+mechanism.** The first write-up of this row attributed the 13.1% cell drop to X4's
+glitch-truncation — one register stopping 1024 multiplier outputs from toggling
+through 1024 adders. The cell-class breakdown refutes it:
+
+| cell class | `PIPE=0` | `PIPE=1` | Δ µm² |
+|---|---|---|---|
+| `timing_repair_buffer` | 1,141,280 | 631,196 | **−510,084** |
+| `sequential_cell` | 261,687 | 335,781 | +74,094 (the 16,384 new flops) |
+| everything else | — | — | +52,254 |
+| **total stdcell** | 4,745,090 | 4,361,340 | **−383,750** |
+
+The repair-buffer saving **exceeds the total**, and the balance is exact. `PIPE=0`
+misses its target by 1.6654 ns and `PIPE=1` by 0.7041, so the tool spends half a
+million µm² of buffers on the harder one and gives them back on the easier one.
+This is X1-Y0's signature — "−10,644 stdcells against −10,437 timing-repair
+buffers: the same cells" — reappearing in an RTL change rather than a target change.
+
+**Power is a separate question and is not settled by this pair.** −65.0% power
+against −10.8% area is not proportionate to the buffers removed, and glitch
+truncation remains the plausible mechanism for the remainder — X1 measured −94.8%
+power from exactly this change shape at equal target. But the two effects are not
+separated here, and a row that cannot separate them should say so rather than pick
+the more flattering one. Ranking power in the declaration is still what made the
+effect visible at all.
+
+Flop prediction **74,252 against 74,252 measured** — asserted by
+`trial.sh --expect-flops`, not logged beside the result.
+
+### The prediction was WRONG, and the way it was wrong is the finding
+
+X5 declared a floor of **3.692 ns / 270.9 MHz** and predicted Y1 would reach it.
+Measured **4.7041 ns / 212.6 MHz** — 1.012 ns short, capturing about half the
+2.021 ns the register was supposed to remove.
+
+The path report says why. Routed, with parasitics, delay attributed by region:
+
+| region | p2 `PIPE=0` | p3 `PIPE=1` |
+|---|---|---|
+| `ccnt` fanout + operand/epilogue muxes | 0.952 ns | 1.087 ns |
+| `fp8_mul` | 1.006 ns | **0 — registered out** |
+| `fp32_add` | 3.299 ns | 3.315 ns |
+| **data path from Q** | **5.257 ns** | **4.402 ns** |
+
+`fp32_add` is 3.299 → 3.315 ns, so extrapolating the adder segment was correct.
+`fp8_mul` is gone, so the register did exactly its job. **The error was the
+startpoint.** The floor assumed the post-register path would be
+`pr → fp32_add → lacc`. It is not: the worst path launches from **`ccnt[2]`** — a
+control counter — spends 1.087 ns in a buffer tree and through mux *select* pins,
+and only then enters the adder. A data-side register cannot shorten a path that
+arrives at a mux on its control input.
+
+**And the accumulate loop has never been the limiter.** All three routed runs —
+p1, p2, p3 — launch from `ccnt`, at both `PIPE` settings, on both platforms; only
+the lane the path lands on moves with placement (p1 lane 1, p2 lane 2, p3 lane 0).
+X5's "What X5 CANNOT reach" named `lacc → fp32_add → lacc` as the floor. That loop
+is genuinely irreducible, and it is genuinely **not** what is binding. The
+generation was right about the arithmetic and wrong about the topology, and no
+amount of further datapath pipelining would have revealed it — only reading the
+startpoint did.
+
+The next move follows directly and is cheap: **register the control `ccnt` drives**,
+so the mux select is settled at cycle start and the path begins adjacent to the
+adder. That is ~1.09 ns of the remaining 4.402 ns for a few hundred replicated
+flops, against the 16,384 this rung cost. It is a *control*-pipelining generation,
+not another datapath one.
+
+### Correction to the head-to-head above: cycles no longer match
+
+The [head-to-head](#head-to-head-same-macs-same-cycles-same-operand-delivery) table
+concluded "because MACs and cycles match exactly, the throughput ratio *is* the
+frequency ratio — no accounting required." **`PIPE=1` breaks that**: 21 cycles
+against `amx_tdpbssd`'s 20, so the two ratios diverge and latency has to be stated.
+The comparison is still controlled on MAC count and operand delivery.
+
+Restated at each design's own operating point — `amx_tdpbssd` `PIPE=3 RD_REG=1` at
+1.40 ns, `amx_fp8` at 4.00 ns:
+
+| cost of bit-exact FP32 accumulation | was (p1) | now (p3) |
+|---|---|---|
+| frequency | 3.99× | 3.29× |
+| **throughput** | **3.99×** | **3.45×** |
+| stdcells | 7.48× | **6.49×** |
+| area | 4.55× | **4.17×** |
+| flip-flops | 1.23× | **1.58×** ← worse |
+| energy per MAC | ~65× | **~20×** |
+
+So the claim "4.0× the throughput and 7.5× the cells" becomes **3.45× and 6.49×**:
+one register recovered roughly an eighth of the penalty. Flops moved the wrong way,
+as they must — 16,384 registers is pure storage.
+
+**Two caveats, in order of how much they should bother a reader.** The power column
+compares runs at *different targets* (1.40 vs 4.00 ns) so optimiser effort differs,
+and this log's own rows span 19.0 W to 0.99 W for one design at one target — read
+"~20×" as an order of magnitude, not a measurement. The frequency comparison
+crosses targets too, so by this project's own rule it is not like-for-like; it is
+fair as "each design at its own operating point" and nothing stronger. The p2 → p3
+pair carries no such caveat.
+
+The broader read: FP32 accumulation's cost was never mainly speed. At 3.45× the
+throughput but ~20× the energy and 6.49× the cells, what IEEE-exact accumulation
+buys you is paid for in silicon and power — and this rung moved the cheap axis
+further than the expensive one.
+
+### Verified before the row was claimed
+
+| gate | result |
+|---|---|
+| `PIPE=0` flop count | **57,867** — identical to the pre-parameter RTL, the figure p1 predicted and hit |
+| `PIPE=0` cell histogram | **identical** to pre-parameter RTL: 26 cell types, 116,911 cells |
+| `PIPE=1` flop count | 74,252 = 16,384 product bits + `v_sr` |
+| `tb_fp8_mul.v` | `y[15:0] == 0` on all **262,144** inputs → the 16-bit register is lossless by exhaustion |
+| `tb_amx_fp8.v` | 29/29 at every `PIPE` × `RD_REG`, bit-exact against `fp8_golden.py` |
+| mutation | a pure `kcnt` rotation is survived by **18 of 29** checks; new case **O1** fails 256/256 |
+| `make sim-matrix` | all **34** configurations |
+| both rows | `reg→reg` limited, DRC 0, GDS present (3.5 GB / 3.3 GB) |
+
+O1 exists because `amx_tdpbssd`'s S6 lesson transfers: FP32 addition is not
+associative, a one-off enable *permutes* k rather than dropping it, and uniform
+operands cannot see a permutation even in principle. O1 accumulates `2^24` at k=0
+then `1.0` for k=1..15; in order every one vanishes to an RNE tie, permuted they sum
+to 15 first and survive — `0x4B800000` against `0x4B800008`.
+
+### Process notes
+
+**A mutation that proves nothing.** The first mutant tried was a doubly-delayed
+accumulate enable. In `amx_fp8` that *drops* k rather than permuting it, because the
+late pulse lands on EP0 where `ep0` has already taken lanes 0 and 2's operand B —
+22 of 29 checks catch it, and it says nothing about ordering. Only a pure `kcnt`
+rotation isolates order from count.
+
+**A path-report script that double-counted.** The first attribution of p2's path
+spanned first-`MUX2`-to-last-`MUX2` and so swallowed `fp8_mul`, reporting a 1.323 ns
+"operand mux". Walking the path in order and binding each row to a region gives the
+table above. Both numbers were mine and only the second is in this log; the first is
+recorded here so the discarded figure is not mistaken for a measurement.
+
+**`make measure` never passed `-P`.** Found while plumbing `PIPE` through: the target
+dropped the flag, so `make measure PIPE=n` had always built `PIPE=0`. The drift guard
+at `measure.sh:127` structurally cannot catch it — with no `-P` both sim and synth
+agree on the default, so the guard is satisfied while the requested configuration was
+never built. Every `PIPE` row on record came through `trial.sh`, which does pass it,
+so no published row is affected; but the `make` route to a `PIPE` row was dead for the
+whole amx campaign.

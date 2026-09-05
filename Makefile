@@ -36,14 +36,17 @@ DESIGN ?= mac_array
 # INT32, which is a deliberate deviation. Both are built and measured.
 SAT    ?= 1
 
-# amx_tdpbssd feed-forward pipeline depth, 0..3. Latency is 17+PIPE cycles;
-# throughput is one k-step per cycle regardless. The accumulate is a feedback
-# loop and no PIPE level shortens it -- see experiments/harness.md, X1.
+# Feed-forward pipeline depth, and it is shared by TWO designs whose ranges are
+# NOT the same: amx_tdpbssd takes 0..3 (latency 17+PIPE cycles), amx_fp8 takes
+# 0..1 (latency 20+PIPE). So a value that is legal for one is out of range for
+# the other, and nothing here can catch that -- only the design's own assertions
+# can. Throughput is one k-step per cycle at every level. The accumulate is a
+# feedback loop and no PIPE level shortens it -- see experiments/harness.md, X1.
 PIPE   ?= 0
 
-# amx_tdpbssd and tpu_mmu: 1 registers rd_data, moving the readback off the
-# output-port path where clock insertion delay cannot cancel. Costs a readback
-# cycle, not throughput.
+# amx_tdpbssd, tpu_mmu and amx_fp8: 1 registers rd_data, moving the readback off
+# the output-port path where clock insertion delay cannot cancel. Costs a
+# readback cycle, not throughput.
 RDREG  ?= 0
 
 # tb_fp32_add random-vector count. 20000 is the routine gate; the adder is the
@@ -82,8 +85,8 @@ help:
 	@echo "  make sim-amx         AMX TDPBSSD regression   (SAT=$(SAT) PIPE=$(PIPE))"
 	@echo "  make sim-tpu         TPU systolic regression  (TN=$(TN) RDREG=$(RDREG))"
 	@echo "  make sim-fp8units    FP32 adder + FP8 multiplier, the leaf arithmetic"
-	@echo "  make sim-fp8         AMX-FP8 regression, all 4 ops (RDREG=$(RDREG))"
-	@echo "  make sim-matrix      all designs, all parameter states (32 configs)"
+	@echo "  make sim-fp8         AMX-FP8 regression, all 4 ops (PIPE=$(PIPE) RDREG=$(RDREG))"
+	@echo "  make sim-matrix      all designs, all parameter states (34 configs)"
 	@echo "  make sim-all         run the regression at N=4,8,16"
 	@echo "  make golden          run the Python reference model"
 	@echo ""
@@ -93,7 +96,7 @@ help:
 	@echo ""
 	@echo "  make measure         sim-gated synth+P&R, print a QoR row"
 	@echo "                       (DESIGN=$(DESIGN) N=$(N) TN=$(TN) CPORT=$(CPORT) OUTPAR=$(OUTPAR)"
-	@echo "                        SAT=$(SAT) PERIOD=$(PERIOD) UTIL=$(UTIL))"
+	@echo "                        SAT=$(SAT) PIPE=$(PIPE) RDREG=$(RDREG) PERIOD=$(PERIOD) UTIL=$(UTIL))"
 	@echo "  make gds             build+verify the GDS of a routed config"
 	@echo "  make path            worst timing path of the last measure -- WHY"
 	@echo "                       the clock is what it is"
@@ -174,12 +177,12 @@ sim-matrix:
 	    && echo "  PASS  tpu_mmu     N=$$n RD_REG=$$r" \
 	    || { echo "  FAIL  tpu_mmu     N=$$n RD_REG=$$r"; exit 1; }; \
 	done; done
-	@for r in 0 1; do \
-	  $(MAKE) --no-print-directory sim-fp8 RDREG=$$r >/dev/null \
-	    && echo "  PASS  amx_fp8     RD_REG=$$r" \
-	    || { echo "  FAIL  amx_fp8     RD_REG=$$r"; exit 1; }; \
-	done
-	@echo "== all 32 configurations PASS =="
+	@for r in 0 1; do for p in 0 1; do \
+	  $(MAKE) --no-print-directory sim-fp8 RDREG=$$r PIPE=$$p >/dev/null \
+	    && echo "  PASS  amx_fp8     PIPE=$$p RD_REG=$$r" \
+	    || { echo "  FAIL  amx_fp8     PIPE=$$p RD_REG=$$r"; exit 1; }; \
+	done; done
+	@echo "== all 34 configurations PASS =="
 
 .PHONY: sim-amx
 # The AMX regression. Separate target rather than a DESIGN switch on `sim`,
@@ -232,13 +235,18 @@ sim-fp8units: $(BUILD)
 # The AMX-FP8 array regression. All four instructions in one netlist, so there is
 # no op= parameter here: op[1:0] is a runtime input and the testbench exercises
 # every value.
+#
+# PIPE and RDREG are both in the artifact names, the way sim-amx carries SAT and
+# PIPE: sim-matrix now runs four of these back to back, and a shared .vvp/.log
+# name would leave only the last one on disk -- so the log you open to diagnose a
+# failure would be a different configuration's than the one that failed.
 sim-fp8: $(BUILD)
-	@echo "== AMX-FP8 regression RD_REG=$(RDREG) =="
-	@$(IVERILOG) -g2005 -o $(BUILD)/tb_amx_fp8_r$(RDREG).vvp \
-	  -Ptb_amx_fp8.RD_REG=$(RDREG) \
+	@echo "== AMX-FP8 regression PIPE=$(PIPE) RD_REG=$(RDREG) =="
+	@$(IVERILOG) -g2005 -o $(BUILD)/tb_amx_fp8_p$(PIPE)_r$(RDREG).vvp \
+	  -Ptb_amx_fp8.PIPE=$(PIPE) -Ptb_amx_fp8.RD_REG=$(RDREG) \
 	  tb/tb_amx_fp8.v rtl/amx_fp8.v rtl/fp8_mul.v rtl/fp32_add.v
-	@vvp $(BUILD)/tb_amx_fp8_r$(RDREG).vvp | tee $(BUILD)/sim_amx_fp8_r$(RDREG).log
-	@grep -q '^RESULT: PASS' $(BUILD)/sim_amx_fp8_r$(RDREG).log \
+	@vvp $(BUILD)/tb_amx_fp8_p$(PIPE)_r$(RDREG).vvp | tee $(BUILD)/sim_amx_fp8_p$(PIPE)_r$(RDREG).log
+	@grep -q '^RESULT: PASS' $(BUILD)/sim_amx_fp8_p$(PIPE)_r$(RDREG).log \
 	  || { echo "AMX-FP8 regression FAILED"; exit 1; }
 
 .PHONY: golden
@@ -260,10 +268,16 @@ schematic:
 # Physical flow. measure.sh re-runs the regression itself and refuses to
 # produce a QoR row unless it passes.
 .PHONY: measure
+# -P $(PIPE) is NOT optional here, and it was missing until amx_fp8 gained a PIPE.
+# Every PIPE row on record came from trial.sh, which does pass it, so nobody
+# noticed that `make measure PIPE=2` silently built PIPE=0: measure.sh's own
+# default is 0, and its drift guard cannot see this -- the guard compares the sim
+# gate against synthesis, and with no -P at all BOTH sides agree on the wrong
+# value. A dropped argument here is invisible to every check downstream of it.
 measure: require-setup
 	@ORFS="$(ORFS)" YOSYS_EXE="$(YOSYS_EXE)" KLAYOUT_CMD="$(KLAYOUT_CMD)" \
 	  ./scripts/measure.sh -d $(DESIGN) -n $(N) -c $(CPORT) -r $(OUTPAR) -s $(SAT) -R $(RDREG) \
-	     -T $(TN) -p $(PERIOD) -u $(UTIL) $(if $(TAG),-t $(TAG),)
+	     -P $(PIPE) -T $(TN) -p $(PERIOD) -u $(UTIL) $(if $(TAG),-t $(TAG),)
 
 # Build/rebuild the GDS for an already-routed config, without re-running the
 # flow. measure.sh does this inline now; this is for configs routed before that

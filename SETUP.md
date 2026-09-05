@@ -251,19 +251,47 @@ paths, so nothing afterwards needs exported variables.
 ## 4. Verify end to end
 
 ```bash
-make sim        # 9/9 must pass
-make measure    # ~3 min at N=4; prints one QoR row
+make sim        # 22/22 must pass
+make measure    # N=4; prints one QoR row
 make path       # the worst timing path of that run
 ```
 
-A correct N=4 baseline (ORFS 26Q3-1510, nangate45, typical corner):
+**Check against the row for the configuration you actually built, not the one
+below.** `make measure` with no arguments defaults to `CPORT=1`, so it emits
+nickname `my_chip_n4_c1` and its comparison row is **f1b** in `EXPERIMENTS.md`.
+The row quoted here is **v0**, measured before `C_PORT` existed as a parameter at
+all — which is why its nickname has no `_c` suffix. Comparing today's default
+against it silently compares two different designs, and the external-C port is
+worth +1,170 stdcells and −22 MHz.
 
 ```
-| my_chip_n4 | 4 | 1.00 ns | -0.2776 | -51.594 | +0.0021 | 783 MHz | 0 | 7979 | 455 | 12817 | 0.0820 |
+v0  (C_PORT absent -- historical)
+| my_chip_n4    | 4 | 1.00 ns | -0.2776 | -51.594 | +0.0021 | 783 MHz | 0 | 7979 | 455 | 12817 | 0.0820 |
+f1b (C_PORT=1 -- what `make measure` builds today)
+| my_chip_n4_c1 | 4 | 1.00 ns | -0.3223 | -57.2   | +0.0004 | 756 MHz | 0 | 9158 | 455 | 13663 | 0.0700 |
 ```
 
-If your numbers differ materially, the likely cause is a different ORFS revision
-or PDK, not a broken install — record the ORFS commit in `EXPERIMENTS.md`.
+If your numbers differ materially, the likely cause is a different OpenROAD
+revision or PDK, not a broken install — record the commit in `EXPERIMENTS.md`.
+Note that "ORFS 26Q3-1510" above and in `EXPERIMENTS.md` is **OpenROAD's**
+`git describe`, not ORFS's: ORFS's own `26Q3` tag is only a few hundred commits
+back, and the ORFS commit that pins OpenROAD `6cb3f2b704` is `6ada18baba`.
+
+### Reproduced on Linux, 2026-09-04
+
+The same OpenROAD commit built on AlmaLinux 9.6 / x86_64 / gcc 11.5 (rather than
+macOS / arm64 / AppleClang) reproduces **f1b** as:
+
+```
+| my_chip_n4_c1 | 4 | 1.00 ns | -0.3047 | -60.409 | -0.0002 | 766 MHz | 0 | 9142 | 455 | 13526 | 0.0779 |
+```
+
+Flip-flops **exact** (455), stdcells −0.17%, area −1.0%, fmax +1.3% — inside the
+48 MHz attribution noise this project already measured. Two things did move:
+hold went `+0.0004, 0 violations` to `−0.0002, 1 violation`, and power +11%. So
+the platform is not a free variable even at identical tool revision: rows
+measured on different platforms are comparable in structure and should not be
+compared in hold or power.
 
 ## Honest status of this document
 

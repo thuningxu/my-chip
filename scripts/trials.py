@@ -15,6 +15,11 @@ move. It does NOT decide anything -- "flat" is a threshold on a number, and
 whether that means the harness is exhausted is a judgement that belongs to
 whoever reads it, next to what the generation said it could and could not reach.
 
+Trials from different DESIGNS are kept apart. Every diagnostic in this file is a
+delta between consecutive rows, and a delta between two designs is a number with
+no referent: an amx_fp8 PIPE=1 row ranked against an amx_tdpbssd PIPE=1 row shares
+a knob name and nothing else. So each design gets its own grid and its own ladder.
+
     python3 scripts/trials.py                # the grid
     python3 scripts/trials.py --metric area_um2
     python3 scripts/trials.py --full         # every field of every trial
@@ -62,6 +67,29 @@ def fmt(v, spec="%s"):
     return "-" if v is None else spec % v
 
 
+def by_design(trials):
+    """Split the log by design, in FIRST-APPEARANCE order.
+
+    Two designs in one trials.jsonl is not hypothetical: amx_fp8 arrives at X5
+    while amx_tdpbssd already holds X1..X4. Merged, they would share one ladder
+    and one flatness verdict -- so an amx_fp8 row would be credited or blamed for
+    a step away from a completely different netlist, and "d fmax" between the two
+    would be a subtraction with no referent. The X axis does not save us either:
+    nothing enforces that two designs never reuse an X number.
+
+    First-appearance order rather than sorted() so the design that is already
+    published stays at the top of the output, which is what experiments/RESULTS.md
+    is generated from.
+    """
+    groups = {}
+    for t in trials:
+        # Rows predating the "design" field can only be amx_tdpbssd, but do not
+        # guess: an unlabelled row grouped under a name it may not belong to is
+        # the same defect one level down.
+        groups.setdefault(t.get("design", "UNLABELLED"), []).append(t)
+    return list(groups.items())
+
+
 def headline(m):
     """The frequency that describes the HARDWARE, plus how trustworthy it is.
 
@@ -87,8 +115,12 @@ def headline(m):
     return m["implied_fmax_mhz"], cls, False
 
 
-def ladder(trials):
+def ladder(trials, design=None, multi=False):
     """Cost per unit gain, grouped by RTL VARIANT (PIPE), not by trial.
+
+    Called once per design. `multi` names the design in the heading only when the
+    log holds more than one -- with a single design the name is redundant, and
+    printing it would change the text experiments/RESULTS.md is generated from.
 
     Per-trial was wrong and the output said so: it split PIPE=1's gain across two
     rows -- "+0.3 MHz for +4,610 flops" at the saturated 2.80 ns target, then
@@ -100,8 +132,15 @@ def ladder(trials):
     compares consecutive levels. That is the number which answers the question the
     ladder exists for: is the next pipeline stage worth its flops.
     """
+    suffix = " -- %s" % design if multi else ""
     ok = [t for t in trials if t.get("metrics")]
     if len(ok) < 2:
+        # Say so rather than vanishing. Once the log holds two designs, a silently
+        # absent ladder looks like the per-design split lost the rows, which is
+        # the opposite of what happened.
+        print("Ladder economics%s: %d measured trial(s). A rung is a comparison"
+              % (suffix, len(ok)))
+        print("  between two variants, so there is nothing to rank yet.\n")
         return
     # Group by the FULL RTL variant, not by PIPE alone. Keying on PIPE made
     # "PIPE=3" resolve to X3-Y0, which is PIPE=3 AND RD_REG=1, so RD_REG's gain
@@ -114,7 +153,7 @@ def ladder(trials):
         k = (t["knobs"]["PIPE"], t["knobs"].get("RD_REG", 0))
         if k not in best or headline(t["metrics"])[0] > headline(best[k]["metrics"])[0]:
             best[k] = t
-    print("Ladder economics, best result per RTL variant")
+    print("Ladder economics, best result per RTL variant%s" % suffix)
     print("  (ranked on reg->reg fmax -- see headline() for why not implied_fmax)\n")
     print("  %-9s %-8s %-9s %-9s %-8s %-9s %-18s %s"
           % ("variant", "best at", "fmax MHz", "d fmax", "flops", "d flops",
@@ -146,9 +185,13 @@ def ladder(trials):
     print()
 
 
-def grid(trials, metric):
+def grid(trials, metric, design=None, multi=False):
+    # Called once per design, for the reason by_design() gives: the d-fmax column
+    # and the flat/saturated verdict below are deltas down a single X row, and a
+    # row holding two designs would compute both across a change of netlist.
     xs = sorted({t["x"] for t in trials})
-    print("X-Y grid  (metric: %s, headline: reg->reg fmax)\n" % metric)
+    print("X-Y grid%s  (metric: %s, headline: reg->reg fmax)\n"
+          % (" -- %s" % design if multi else "", metric))
     for x in xs:
         row = sorted((t for t in trials if t["x"] == x), key=lambda t: t["y"])
         print("  X%d" % x)
@@ -239,8 +282,14 @@ def main():
     if a.full:
         full(trials)
     else:
-        grid(trials, a.metric)
-        ladder(trials)
+        # Grids first, then ladders, keeping the two-section shape RESULTS.md
+        # mirrors with its headings rather than interleaving per design.
+        groups = by_design(trials)
+        multi = len(groups) > 1
+        for name, ts in groups:
+            grid(ts, a.metric, name, multi)
+        for name, ts in groups:
+            ladder(ts, name, multi)
     print("  %d trial(s) in %s" % (len(trials), os.path.relpath(JSONL, HERE)))
 
 

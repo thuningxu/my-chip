@@ -108,10 +108,17 @@ case "$DESIGN" in
     RTL_LIST="$HERE/rtl/amx_fp8.v $HERE/rtl/fp8_mul.v $HERE/rtl/fp32_add.v"
     TB_FILE="$HERE/tb/tb_amx_fp8.v"
     # The four instructions are a RUNTIME input (op[1:0]), not a build
-    # parameter, so RD_REG is the only thing to configure.
-    TOP_PARAMS="RD_REG $RDREG"
-    SIM_PARAMS=(-Ptb_amx_fp8.RD_REG="$RDREG")
-    CFG_DESC="RD_REG=$RDREG"
+    # parameter, so PIPE and RD_REG are the only things to configure.
+    #
+    # PIPE HAS TO BE IN ALL THREE OF THESE. Range here is 0..1, not amx_tdpbssd's
+    # 0..3, and it moves a register into the product path -- so it changes the
+    # netlist. Passing it to the testbench but not to TOP_PARAMS is precisely the
+    # drift the guard below exists for: that omission once had the gate simulate
+    # PIPE=1 while the flow built PIPE=0, and the trial logged a duplicate of its
+    # own baseline under the other configuration's name.
+    TOP_PARAMS="PIPE $PIPE RD_REG $RDREG"
+    SIM_PARAMS=(-Ptb_amx_fp8.PIPE="$PIPE" -Ptb_amx_fp8.RD_REG="$RDREG")
+    CFG_DESC="PIPE=$PIPE RD_REG=$RDREG"
     # See config.mk.in: `share` cannot help a design whose 1024 adders all run
     # every cycle, and it does not terminate in reasonable time on this one.
     SYNTH_ARGS="-noshare"
