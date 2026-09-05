@@ -14,13 +14,13 @@ Four designs live here, selected with `DESIGN=`:
 | **`mac_array`** (default) | INT4 outer-product MAC array. The v0 baseline, deliberately the simplest *correct* design. `D = init + A@B` with three init modes and two readout modes | 16 mult at N=4, 256 at N=16 |
 | **`amx_tdpbssd`** | **Intel AMX `TDPBSSD`** — INT8 tile dot-product, `C += A@B` on `(16,64)@(64,16)`, 16,384 MACs, with optional INT32 saturation | 1024 mult, 16 cycles |
 | **`tpu_mmu`** | **TPU v1-style weight-stationary systolic array** — `C += A@W`, N×N, INT8. Built at `TN=32` because 32×32 = 1024 multipliers is *exactly* `amx_tdpbssd`'s count, which makes systolic-vs-broadcast a controlled comparison rather than one across scales | 1024 mult at TN=32, 3N cycles |
-| **`amx_fp8`** | **Intel AMX-FP8** (Diamond Rapids) — all four mix-and-match variants (`TDPBF8PS`/`TDPBHF8PS`/`TDPHBF8PS`/`TDPHF8PS`) in one netlist, selected at *runtime* by `op[1:0]`. `C += A@B` on `(16,64)@(64,16)`, fp8 in, **IEEE FP32 accumulate**. Same operand delivery as `amx_tdpbssd`, so the delta is purely the arithmetic | 1024 mult + **1024 FP32 adders**, 20 cycles |
+| **`amx_fp8`** | **Intel AMX-FP8** (Diamond Rapids) — all four mix-and-match variants (`TDPBF8PS`/`TDPBHF8PS`/`TDPHBF8PS`/`TDPHF8PS`) in one netlist, selected at *runtime* by `op[1:0]`. `C += A@B` on `(16,64)@(64,16)`, fp8 in, **IEEE FP32 accumulate**. Same operand delivery as `amx_tdpbssd`, so the delta is purely the arithmetic. `PIPE=1` registers the product to get the operand mux and the multiply out of the accumulate loop | 1024 mult + **1024 FP32 adders**, 20+`PIPE` cycles |
 
 ```bash
-make sim-matrix                          # all designs, all parameter states (32)
+make sim-matrix                          # all designs, all parameter states (34)
 make measure DESIGN=amx_tdpbssd SAT=1    # synth + P&R one of them
 make measure DESIGN=tpu_mmu TN=32 RDREG=1
-make measure DESIGN=amx_fp8 RDREG=1
+make measure DESIGN=amx_fp8 RDREG=1 PIPE=1
 ```
 
 ## Prerequisites
