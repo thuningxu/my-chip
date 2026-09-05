@@ -7,9 +7,21 @@
 | `tpu_mmu.v` | **TPU v1-style weight-stationary systolic array** — `C += A@W`, N×N INT8, weights resident in the PEs, accumulators outside the array | 1024 multipliers at `N=32`, 3N cycles |
 | `amx_fp8.v` | **Intel AMX-FP8** (Diamond Rapids) — all four mix-and-match variants in one netlist, `op[1:0]` at runtime. fp8 in, **IEEE FP32 accumulate** | 1024 multipliers + 1024 FP32 adders, `20 + PIPE` cycles |
 | `fp8_mul.v` | `fp8_dec` (E5M2/E4M3 → a common 4-bit significand, DAZ) + `fp8_mul` (exact 4×4 product into FP32). Leaf blocks of `amx_fp8` | 146 cells; 1024 instances |
-| `fp32_add.v` | IEEE binary32 adder — RNE, DAZ in, FTZ out, Inf/NaN. **1198 cells, ~6.2 ns, and it sits inside a feedback loop 1024 times over** | the design's frequency floor |
+| `fp32_add.v` | IEEE binary32 adder — RNE, DAZ in, FTZ out, Inf/NaN. **2,270 cells at 2.491 ns standalone, 3.31 ns routed in-array, and it sits inside a feedback loop 1024 times over** | the design's frequency floor — see below |
 
 The first three are independent top-level modules with no shared code.
+
+**The `fp32_add` figure above is deliberately not the `~6.2 ns` this file used to
+quote.** That was 6.180 ns / 1,260 cells from `abc -liberty`, and `EXPERIMENTS.md`
+repudiates it: ORFS maps the same RTL with `abc_speed.script` plus
+`upsize`/`dnsize` and gets **2,270 cells at 2.491 ns** — 1.80× the area for 2.48×
+the speed. The optimistic timing is what caused a 7.00 ns target to be chosen and a
+whole run to be thrown away, and the lesson recorded there is "benchmark a leaf
+with the flow's own recipe or not at all." Quoting the discredited number in the
+module table undid that lesson, so the table now carries the flow-recipe figure and
+the routed in-array one (3.299 ns at `PIPE=0`, 3.315 at `PIPE=1`) beside it. The
+1.33× between 2.491 and 3.31 is real parasitics and in-array fanout.
+
 `amx_fp8` is the exception and deliberately so: `fp32_add` appears 1024 times and
 is also reused by the epilogue, so it is a real module with its own exhaustive
 testbench rather than inlined logic. `measure.sh -d` selects which design to
