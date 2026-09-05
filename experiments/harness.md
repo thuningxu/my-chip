@@ -24,8 +24,18 @@ Each X below therefore declares what it reads, what it blames, what it proposes,
 and — importantly — **what it cannot reach**, so that a plateau is interpretable
 rather than merely disappointing.
 
-Target design: `amx_tdpbssd` (Intel AMX `TDPBSSD`, INT8, 1024 multipliers).
+Target designs, in order: **X1–X4** climbed `amx_tdpbssd` (Intel AMX `TDPBSSD`,
+INT8, 1024 multipliers) and closed at X4. **X5 onward** targets `amx_fp8` (Intel
+AMX-FP8, fp8 in, IEEE FP32 accumulate, 1024 multipliers and 1024 FP32 adders). The
+target is named again in each generation, because a generation that does not say
+what it is climbing cannot be checked against the row it produced.
+
 Harness: Claude Code only. One agent runs both loops.
+
+`scripts/trials.py` keeps the two designs' grids and ladders apart. A delta between
+two designs is a number with no referent — an `amx_fp8` `PIPE=1` row ranked against
+an `amx_tdpbssd` `PIPE=1` row shares a knob name and nothing else — and the X axis
+does not save you, since nothing stops two designs reusing an X number.
 
 ---
 
@@ -1014,3 +1024,123 @@ measured `amx_tdpbssd`'s PIPE=1 as worth +0.3 MHz when it was worth +54.7. So Y1
 also measured at **3.40 ns**, below its predicted need, to find where it actually
 stops. That second row crosses targets and is labelled as such: only the 4.00 ns pair
 is like-for-like.
+
+### X5-Y0 result — the platform, isolated before anything was claimed
+
+Y0 changed no RTL. It re-measured p1's exact configuration on the second platform,
+so that every later delta is same-platform. Against p1:
+
+| | p1 (macOS/arm64) | X5-Y0 (Linux/x86_64) | Δ |
+|---|---|---|---|
+| flip-flops | 57,867 | **57,867** | **exact** |
+| stdcells | 3,985,240 | 3,974,058 | −0.28% |
+| area µm² | 4,758,450 | 4,745,090 | −0.28% |
+| power W | 40.3523 | 40.2251 | −0.32% |
+| reg→reg fmax | 175.0 | 176.5 | +0.84% |
+| hold WS | +0.0448 | +0.0423 | both met |
+
+**The platform is not a variable for this design**, and that had to be measured
+rather than assumed — on `mac_array` the same platform change moved power 11% and
+pushed one endpoint into hold violation. Here everything agrees inside 0.32%. So p1
+and the X5 rows are comparable after all, and the caveat that hung over every
+number until this row landed is retired.
+
+Y0 also discharges the "PIPE is free at PIPE=0" claim, at two levels. Synthesis:
+57,867 flops and an **identical cell histogram** to the pre-parameter RTL (26 cell
+types, 116,911 cells). Routed: 57,867 flops again. So the parameter's control
+restructuring constant-folds exactly, and Y0 → Y1 is one variable.
+
+### X5-Y1 result — the change works, the prediction does not
+
+| | Y0 `PIPE=0` | Y1 `PIPE=1` | Δ |
+|---|---|---|---|
+| reg→reg fmax | 176.5 MHz | **212.6 MHz** | +20.5% |
+| cycles | 20 | 21 | +5% |
+| **throughput** | 144.6 GMAC/s | **165.9 GMAC/s** | **+14.7%** |
+| power | 40.2251 W | **14.0894 W** | **−65.0%** |
+| energy efficiency | 3.59 GMAC/J | **11.77 GMAC/J** | **3.28×** |
+| stdcells | 3,974,058 | 3,454,124 | −13.1% |
+| flip-flops | 57,867 | **74,252** | +28.3% |
+| TNS | −59,371.7 | −12,285.5 | 4.8× |
+
+Predictions 2, 3 and 5 held. Flops **74,252 against 74,252**, checked by
+`--expect-flops` rather than logged beside the result. Cycles 20 → 21. Power fell
+substantially, which is what prediction 5 asked for.
+
+**But the area saving is optimiser effort, not the mechanism X4 identified**, and
+this generation nearly credited it to the wrong cause. The cell-class breakdown:
+`timing_repair_buffer` 1,141,280 → 631,196 µm², a **−510,084** saving that
+*exceeds* the −383,750 total, with `sequential_cell` +74,094 for the new flops and
++52,254 elsewhere balancing it exactly. `PIPE=0` misses its target by 1.6654 ns and
+`PIPE=1` by 0.7041, so the tool buys half a million µm² of buffers for the harder
+one. That is X1-Y0's signature — "the same cells" — showing up in an RTL change
+rather than a target change, and it is a warning that the two are not
+distinguishable from a cell count alone.
+
+Power is not settled by this pair: −65.0% against −10.8% area is out of proportion
+to the buffers removed, so glitch truncation plausibly accounts for the remainder,
+and X1 measured −94.8% from this change shape at equal target. The two effects are
+**not separated here** and the row says so rather than claiming the mechanism it
+would prefer. Ranking power in the report list is still what made the effect visible.
+
+**Prediction 1 FAILED.** Declared floor 3.692 ns / 270.9 MHz, predicted Y1 would
+land on it. Measured **4.7041 ns / 212.6 MHz** — 1.012 ns short.
+
+The declared falsifier was "a result materially *above* 278 MHz means the adder
+segment itself moved under re-placement." It came in *below* the range instead, and
+the path report says the adder did not move at all: **3.299 → 3.315 ns**.
+
+| region | Y0 | Y1 |
+|---|---|---|
+| `ccnt` fanout + operand/epilogue muxes | 0.952 ns | 1.087 ns |
+| `fp8_mul` | 1.006 ns | **0 — registered out** |
+| `fp32_add` | 3.299 ns | 3.315 ns |
+| **data path from Q** | **5.257 ns** | **4.402 ns** |
+
+The register did exactly what it was built to do. The floor was wrong about **which
+path**: it assumed `pr → fp32_add → lacc`, and the worst path launches from
+**`ccnt[2]`**, spends 1.087 ns in a buffer tree and through mux *select* pins, and
+only then reaches the adder. A data-side register cannot shorten a path that arrives
+at a mux on its control input.
+
+### X5 closes, and its "CANNOT reach" section was wrong
+
+X5 declared `lacc → fp32_add → lacc` to be the floor. That loop is irreducible, and
+it is **not what binds**. All three routed runs — p1, Y0, Y1 — launch from `ccnt`, at
+both `PIPE` settings and on both platforms; only the lane moves with placement (p1
+lane 1, Y0 lane 2, Y1 lane 0). The generation was right about the arithmetic and
+wrong about the topology.
+
+Prediction 4 — that a further datapath rung is worthless — **stands, and for a
+better reason than the one given.** It was argued from headroom: 2.361 ns of
+feed-forward against a 3.692 ns loop. The real reason is that the loop was never the
+limiter, so registering more of the datapath cannot help either. `PIPE=2` is
+correctly absent from the RTL.
+
+**Why this is a Y-level failure and not an X-level one.** The rule at the top of this
+document says a single Y failing implicates the design and a whole row going flat
+implicates the harness. Y1 did not go flat — +20.5% clock, −65% power, 3.28× energy
+efficiency, and a Pareto move on every axis but flops. What failed was the
+generation's *model* of where the time goes, and X5's own report list is what caught
+it: reading the startpoint, which X1 added to the harness after `repair_timing`'s
+per-iteration WNS produced two wrong answers in a row. A generation that had only
+watched fmax would have recorded +20.5% and moved on with the wrong mental model
+intact.
+
+### What X6 must be, and it is not more of this
+
+**Register the control that `ccnt` drives.** `ep0/ep1/ep2` are decoded from `ccnt`
+and fan out to the mux in front of 1024 adders across a 3065 µm die, which is what
+the 1.087 ns buys. Registered and replicated near its consumers, the binding path
+would begin adjacent to the adder: ~0.34 ns of register overhead + ~3.32 ns of adder
++ tail ≈ **3.7 ns / ~270 MHz**, for a few hundred flops against the 16,384 this rung
+cost.
+
+Note that this is the number X5 predicted for Y1 — the floor was right about the
+*value* and wrong about which change reaches it. That is worth stating plainly rather
+than quietly reusing the figure.
+
+X6 is a **control**-pipelining generation. The fix family is different from X5's, the
+report it reads is the path startpoint rather than the segment table, and its
+declared limit is the same adder loop — this time with evidence that the loop is
+actually what is left.

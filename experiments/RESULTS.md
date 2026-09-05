@@ -1,4 +1,4 @@
-# X-Y hillclimb results — `amx_tdpbssd`
+# X-Y hillclimb results
 
 Generated from `experiments/trials.jsonl`. Regenerate the tables with
 `python3 scripts/trials.py`. Nothing here is transcribed by hand: every figure is
@@ -9,9 +9,18 @@ read from `6_report.json`, counted in `6_final.v`, or produced by
 which family of fix gets proposed). **Y** = an RTL attempt inside that generation.
 A Y failing implicates the design; an X row going flat implicates the harness.
 
-**Status: closed at X4.** The design is limited by a multiplier carry-propagate at
-**~703 MHz** and is efficient at **~699 MHz / 2.436 W**. Ten trials, one RTL defect
-count of zero, twelve tooling defects.
+**Two designs, kept apart.** X1–X4 climbed **`amx_tdpbssd`**; X5 onward climbs
+**`amx_fp8`**. `trials.py` groups by design, because a delta between two designs is
+a number with no referent. Everything below the `amx_tdpbssd` heading is that
+campaign; X5 has its own section at the end.
+
+**`amx_tdpbssd` status: closed at X4.** The design is limited by a multiplier
+carry-propagate at **~703 MHz** and is efficient at **~699 MHz / 2.436 W**. Ten
+trials, one RTL defect count of zero, twelve tooling defects.
+
+**`amx_fp8` status: X5 open, one logged trial.** `PIPE=1` reaches **212.6 MHz
+`reg→reg`** at −65% power, and falsified X5's own floor. See
+[X5](#x5--amx_fp8-registering-the-product) below.
 
 ## Read this first: which frequency column is real
 
@@ -51,20 +60,23 @@ figure was measuring the pad boundary instead.
 
 ## Per RTL variant — one change per rung
 
-Ladder economics, best result per RTL variant
-(ranked on reg->reg fmax -- see headline() for why not implied_fmax)
+Ladder economics, best result per RTL variant -- amx_tdpbssd
+  (ranked on reg->reg fmax -- see headline() for why not implied_fmax)
 
-variant   best at  fmax MHz  d fmax    flops    d flops   MHz per 1k flops   limiter
-P0/RD0    X1Y0     350.1     -         24584    -                            reg->reg
-P1/RD0    X2Y0     404.8     +54.7     29194    +4610     +11.87             reg->reg
-P2/RD0    X2Y3     505.4     +100.6    45579    +16385    +6.14              reg->reg
-P3/RD0    X2Y4     643.3     +137.9    46604    +1025     +134.54            OUT-PORT
-P3/RD1    X4Y1     702.9     +59.6     47116    +512      +116.41            reg->reg
+  variant   best at  fmax MHz  d fmax    flops    d flops   MHz per 1k flops   limiter
+  P0/RD0    X1Y0     350.1     -         24584    -                            reg->reg
+  P1/RD0    X2Y0     404.8     +54.7     29194    +4610     +11.87             reg->reg
+  P2/RD0    X2Y3     505.4     +100.6    45579    +16385    +6.14              reg->reg
+  P3/RD0    X2Y4     643.3     +137.9    46604    +1025     +134.54            OUT-PORT
+  P3/RD1    X4Y1     702.9     +59.6     47116    +512      +116.41            reg->reg
 
-Only the best target per variant is used: a trial measures an
-(RTL, target) pair, and a saturated target measures the target.
-CAVEAT: rungs come from different targets, so effort still differs.
-Only equal-target pairs are like-for-like comparisons.
+  Only the best target per variant is used: a trial measures an
+  (RTL, target) pair, and a saturated target measures the target.
+  CAVEAT: rungs come from different targets, so effort still differs.
+  Only equal-target pairs are like-for-like comparisons.
+
+Ladder economics -- amx_fp8: 1 measured trial(s). A rung is a comparison
+  between two variants, so there is nothing to rank yet.
 
 
 ## The only like-for-like comparisons — equal target, one variable
@@ -182,3 +194,51 @@ single scalar and therefore could not see a Pareto move.** X1 called its row fla
 The RTL has been correct at all four `PIPE` levels and both `RD_REG` states since it
 was written — 16/16 at every configuration, every flop prediction exact. Every
 defect lived in how the design was measured or reasoned about.
+
+---
+
+## X5 — `amx_fp8`, registering the product
+
+| trial | PIPE/RD | target | limiter | **reg→reg fmax** | reg→reg WS | TNS | hold | cycles | flops | cells | area µm² | power W | DRC |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| — (Y0) | 0/1 | 4.00 | reg->reg | **176.5** | -1.6654 | -59371.7 | +0.0423 | 20 | 57867 | 3974058 | 4745090 | 40.225 | 0 |
+| X5Y1 | 1/1 | 4.00 | reg->reg | **212.6** | -0.7041 | -12285.5 | +0.0454 | 21 | 74252 | 3454124 | 4361340 | 14.089 | 0 |
+
+**Y0 is not in `trials.jsonl`, and the dash in its trial column says so.** It was
+measured with `measure.sh` directly, under nickname `fp8`, *before* `trial.sh`
+supported this design — so it has no trial tag, no goal string and no harness
+record. Its numbers are real and its artifacts are on disk; it simply was not run
+through the harness. It is **not** re-run as a tagged trial because that would be
+~14 hours of place-and-route to buy provenance and no physics: `PIPE=0` on the
+current RTL is proven identical to the pre-parameter RTL it measured — same flop
+count (57,867) and same cell histogram (26 types, 116,911 cells). Aliasing its
+artifact directory to `fp8_x5y0` to manufacture a second record was rejected: a
+reader would see two runs where one happened.
+
+That is why the ladder above reports nothing to rank. One logged trial is one
+variant, and a rung is a comparison. The comparison itself lives in
+[`EXPERIMENTS.md`](../EXPERIMENTS.md#x5-findings--registering-the-product-and-a-floor-that-was-not-the-ceiling)
+as rows **p2** and **p3**, which are same-platform, equal-target and one parameter
+apart.
+
+### The like-for-like comparison
+
+| pair | target | change | Δ reg→reg fmax | Δ throughput | Δ power |
+|---|---|---|---|---|---|
+| Y0 → Y1 | 4.00 | `PIPE` 0→1 | **+36.1** (176.5 → 212.6) | **+14.7%** | **−65.0%** |
+
+The frequency and throughput deltas differ because `PIPE=1` costs a cycle, 20 → 21.
+**+14.7% is the number**; +20.5% is the clock and would overstate the row.
+
+### X5's own prediction, and how it failed
+
+Declared floor **3.692 ns / 270.9 MHz**, predicted Y1 would reach it. Measured
+**4.7041 ns / 212.6 MHz**. The adder segment was predicted correctly (3.299 →
+3.315 ns routed), the multiplier was removed as intended (1.006 → 0 ns), and the
+floor was still wrong — because it assumed the worst path would launch from the new
+product register. It launches from **`ccnt`**, spends 1.087 ns in a control buffer
+tree and through mux select pins, and only then enters the adder.
+
+**The accumulate loop X5 named as its floor has never been the limiter** — p1, Y0
+and Y1 all launch from `ccnt`, at both `PIPE` settings and on both platforms. X6 is
+therefore a *control*-pipelining generation, not another datapath one.
