@@ -59,6 +59,8 @@ module tb_amx_fp8;
     // see the comment there). Get that backwards and either a real cycle
     // regression passes quietly or every case fails for no reason.
     parameter integer PIPE = 0;
+    parameter integer CTRL_REG = 0;
+    parameter integer CHAIN = 0;
 
     localparam integer ROWS   = 16;
     localparam integer COLSB  = 64;
@@ -73,6 +75,7 @@ module tb_amx_fp8;
     // PIPE=1 ever came back at 20 cycles the accumulate window and the epilogue
     // would be overlapping and O1 below is what would catch it.
     localparam integer EXP_CYC = KDW + 3 + 1 + PIPE;
+    localparam integer EXP_II = EXP_CYC - CHAIN;
 
     localparam [1:0] SEL_A = 2'd0, SEL_B = 2'd1, SEL_C = 2'd2;
     localparam [1:0] OP_BB = 2'b00,   // TDPBF8PS
@@ -90,16 +93,16 @@ module tb_amx_fp8;
     reg  [511:0] tile_wdata;
     reg  [1:0]  op;
     reg         start;
-    wire        busy, done;
+    wire        busy, done, start_ready;
     reg  [1:0]  rd_sel;
     reg  [3:0]  rd_row;
     wire [511:0] rd_data;
 
-    amx_fp8 #(.PIPE(PIPE), .RD_REG(RD_REG)) dut (
+    amx_fp8 #(.PIPE(PIPE), .RD_REG(RD_REG), .CTRL_REG(CTRL_REG), .CHAIN(CHAIN)) dut (
         .clk(clk), .rst_n(rst_n),
         .tile_we(tile_we), .tile_sel(tile_sel),
         .tile_row(tile_row), .tile_wdata(tile_wdata),
-        .op(op), .start(start), .busy(busy), .done(done),
+        .op(op), .start(start), .busy(busy), .done(done), .start_ready(start_ready),
         .rd_sel(rd_sel), .rd_row(rd_row), .rd_data(rd_data)
     );
 
@@ -112,6 +115,26 @@ module tb_amx_fp8;
     // model_c always runs before load_tiles, so the DUT is idle either way.
     reg clk_run = 1'b1;
     always #0.5 if (clk_run) clk = ~clk;
+
+    integer clock_edges = 0;
+    always @(posedge clk) clock_edges = clock_edges + 1;
+
+    // Check every replicated bank against the original phase equations, after
+    // NBA updates have settled. This includes idle, launch, flush and epilogue.
+    genvar cm, cn;
+    generate
+        for (cm = 0; cm < ROWS; cm = cm + 1) begin : g_check_m
+            for (cn = 0; cn < DWORDS; cn = cn + 1) begin : g_check_n
+                always @(negedge clk) begin
+                    if (rst_n && dut.g_m[cm].g_n[cn].ep_local !==
+                                 {dut.ep2, dut.ep1, dut.ep0}) begin
+                        $display("RESULT: FAIL (control phase mismatch cell %0d,%0d)", cm, cn);
+                        $finish;
+                    end
+                end
+            end
+        end
+    endgenerate
 
     // ---- the oracle: proven leaf blocks, driven combinationally ------------
     reg  [7:0] o_ab, o_bb;
@@ -442,6 +465,148 @@ module tb_amx_fp8;
         end
     endtask
 
+    // Four instructions on resident A/B, switching formats and chaining C.
+    // No model evaluation, readback, or reload is allowed BETWEEN launches.
+    // The caller holds the next request until ready, without consulting ccnt or
+    // any internal phase. This same driver measures BOTH parameter states.
+    task check_throughput;
+        integer q, m, n, accepted, completed, prev_done;
+        integer interval, latency, bad, elapsed, simultaneous;
+        integer launch_edge [0:3];
+        reg take;
+        reg [31:0] stream_c [0:3][0:ROWS-1][0:DWORDS-1];
+        begin
+            fill_asym_a(FMT_BF8); fill_asym_b(FMT_BF8); set_c_zero;
+            for (q = 0; q < 4; q = q + 1) begin
+                model_c(q[1:0]);
+                for (m = 0; m < ROWS; m = m + 1)
+                    for (n = 0; n < DWORDS; n = n + 1) begin
+                        stream_c[q][m][n] = exp_c[m][n];
+                        c_pre[m][n] = exp_c[m][n];
+                    end
+            end
+            // exp_c retains the final four-operation result; load only C=0.
+            set_c_zero;
+            load_tiles(1'b0);
+            bad = 0; interval = 0; latency = 0;
+            accepted = 0; completed = 0; prev_done = 0;
+            elapsed = 0; simultaneous = 0;
+            @(negedge clk);
+            start = 1'b1; op = OP_BB;
+            while (completed < 4 && elapsed < 4*(4*KDW + 64)) begin
+                @(posedge clk);
+                take = start && start_ready;  // pre-NBA handshake
+                #0.001;
+                elapsed = elapsed + 1;
+                if (take) begin
+                    if (accepted >= 4) bad = bad + 1;
+                    else begin
+                        launch_edge[accepted] = clock_edges;
+                        if (accepted > 0 && clock_edges - launch_edge[accepted-1] != EXP_II)
+                            bad = bad + 1;
+                        accepted = accepted + 1;
+                    end
+                end
+                if (done) begin
+                    if (take) simultaneous = simultaneous + 1;
+                    if (completed >= accepted) bad = bad + 1;
+                    latency = clock_edges - launch_edge[completed];
+                    if (latency != EXP_CYC-1) bad = bad + 1;
+                    if (completed > 0) begin
+                        interval = clock_edges - prev_done;
+                        if (interval != EXP_II) bad = bad + 1;
+                    end
+                    // Observe every produced C, not just the final sum. The
+                    // final external-port read below separately checks readout.
+                    for (m = 0; m < ROWS; m = m + 1)
+                        for (n = 0; n < DWORDS; n = n + 1)
+                            if (dut.cacc[m][n] !== stream_c[completed][m][n]) bad = bad + 1;
+                    completed = completed + 1;
+                    prev_done = clock_edges;
+                end
+                if (busy !== (accepted > completed)) bad = bad + 1;
+                @(negedge clk);
+                start = (accepted < 4);
+                if (accepted < 4) op = accepted[1:0];
+            end
+            start = 1'b0;
+            if (accepted != 4 || completed != 4 || simultaneous != (CHAIN ? 3 : 0)) bad = bad + 1;
+            readback;
+            for (m = 0; m < ROWS; m = m + 1)
+                for (n = 0; n < DWORDS; n = n + 1)
+                    if (got[m][n] !== exp_c[m][n]) bad = bad + 1;
+            if (bad != 0) begin
+                $display("  [FAIL] Q1 resident throughput: %0d errors, II=%0d latency=%0d",
+                         bad, interval, latency);
+                fail_count = fail_count + 1;
+            end else begin
+                $display("  [PASS] Q1 four resident ops, all formats II=%0d latency=%0d simultaneous=%0d",
+                         interval, latency, simultaneous);
+                $display("THROUGHPUT: macs_per_op=%0d initiation_interval_cycles=%0d completion_latency_cycles=%0d resident_ops=4",
+                         ROWS*DWORDS*COLSB, interval, latency);
+                pass_count = pass_count + 1;
+            end
+            check_settled("Q1 results stable after stream");
+        end
+    endtask
+
+    task check_restart_protocol;
+        integer launched, elapsed, m, n, bad;
+        begin
+            // An early one-cycle pulse is NOT a queue entry, and must not clear
+            // the in-flight lanes or latch a different format.
+            fill_asym_a(FMT_BF8); fill_asym_b(FMT_BF8); set_c_zero;
+            model_c(OP_BB); load_tiles(1'b0);
+            @(negedge clk); op = OP_BB; start = 1'b1;
+            @(posedge clk); #0.001; launched = clock_edges;
+            @(negedge clk); start = 1'b0;
+            repeat (2) @(negedge clk);
+            if (start_ready !== 1'b0) fail_count = fail_count + 1;
+            start = 1'b1; op = OP_HH;
+            @(negedge clk); start = 1'b0; op = OP_BB;
+            elapsed = 0;
+            while (done !== 1'b1 && elapsed < 4*KDW + 64) begin
+                @(negedge clk); elapsed = elapsed + 1;
+            end
+            cyc_count = clock_edges - launched + 1; // legacy observation convention
+            readback;
+            check("R1 busy pulse is not queued");
+            check_settled("R1 ignored pulse cannot restart");
+            if (busy !== 1'b0) fail_count = fail_count + 1;
+
+            // Reset aborts the operation and the caller cancels its waiting
+            // valid. No request may survive inside the DUT and restart later.
+            set_c_zero; load_tiles(1'b0);
+            @(negedge clk); op = OP_BB; start = 1'b1;
+            @(negedge clk); start = 1'b0;
+            repeat (2) @(negedge clk);
+            op = OP_HH; start = 1'b1;
+            repeat (2) @(negedge clk);
+            rst_n = 1'b0; #0.001;
+            bad = (start_ready !== 1'b0);
+            @(negedge clk); start = 1'b0;
+            repeat (2) @(negedge clk);
+            rst_n = 1'b1;
+            repeat (EXP_CYC + 3) begin
+                @(negedge clk);
+                if (busy !== 1'b0 || done !== 1'b0 || start_ready !== 1'b1) bad = bad + 1;
+            end
+            readback;
+            for (m = 0; m < ROWS; m = m + 1)
+                for (n = 0; n < DWORDS; n = n + 1)
+                    if (got[m][n] !== 32'd0) bad = bad + 1;
+            if (bad) begin
+                $display("  [FAIL] R2 reset abort/cancel: %0d errors", bad);
+                fail_count = fail_count + 1;
+            end else begin
+                $display("  [PASS] R2 reset aborts without a ghost request");
+                pass_count = pass_count + 1;
+            end
+            fill_asym_a(FMT_HF8); fill_asym_b(FMT_HF8); set_c_zero;
+            do_case(OP_HH, "R3 fresh request after reset");
+        end
+    endtask
+
     // ---- the run -----------------------------------------------------------
     initial begin
         tile_we = 1'b0; tile_sel = 2'd0; tile_row = 4'd0;
@@ -456,8 +621,8 @@ module tb_amx_fp8;
         rst_n = 1'b1;
         repeat (2) @(negedge clk);
 
-        $display("=== tb_amx_fp8  PIPE=%0d RD_REG=%0d  (%0d MACs/instruction, EXP_CYC=%0d) ===",
-                 PIPE, RD_REG, ROWS*DWORDS*COLSB, EXP_CYC);
+        $display("=== tb_amx_fp8 PIPE=%0d RD_REG=%0d CTRL_REG=%0d CHAIN=%0d (%0d MACs, EXP_CYC=%0d EXP_II=%0d) ===",
+                 PIPE, RD_REG, CTRL_REG, CHAIN, ROWS*DWORDS*COLSB, EXP_CYC, EXP_II);
         $display("    pools: BF8 %0d finite bytes, HF8 %0d", pool_n[0], pool_n[1]);
 
         // ---- T: functional, all four instructions --------------------------
@@ -675,6 +840,9 @@ module tb_amx_fp8;
                 b_log[Ki][ni] = (Ki < LANE_N) ? 8'h6C : 8'h3C;
         set_c_zero;
         do_case(OP_BB, "O1 k-order: 2^24 then fifteen 1.0");
+
+        check_throughput;
+        check_restart_protocol;
 
         $display("=== %0d passed, %0d failed ===", pass_count, fail_count);
         if (fail_count != 0) $display("RESULT: FAIL");

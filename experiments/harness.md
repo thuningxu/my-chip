@@ -1144,3 +1144,356 @@ X6 is a **control**-pipelining generation. The fix family is different from X5's
 report it reads is the path startpoint rather than the segment table, and its
 declared limit is the same adder loop — this time with evidence that the loop is
 actually what is left.
+
+## X6 — completed MAC throughput, with registered epilogue control
+
+Declared 2026-09-06, before either X6 trial. Branch:
+`exp/fp8-x6-throughput`. This generation targets `amx_fp8` only.
+
+### Objective and scope
+
+Rank **completed resident-tile MAC throughput**, not MHz or active-cycle peak:
+
+```
+GMAC/s = 16384 * regreg_fmax_MHz / (1000 * initiation_interval_cycles)
+```
+
+The initiation interval must be measured by consecutive operations with no
+readback or reload between them. Report start-to-completion latency separately.
+This excludes tile transfers; it is not end-to-end memory-system throughput.
+Keep all four FP8 format combinations, per-lane k order, balanced epilogue,
+RNE/DAZ/FTZ, and canonical NaN behavior unchanged. No reassociation of sums.
+
+The existing X5-Y1 artifacts give 212.6 MHz and a documented 21-cycle interval,
+or 165.9 GMAC/s. The new back-to-back test must verify that interval rather than
+infer it from the old single-operation latency checker.
+
+### Evidence, hypothesis, and limits
+
+`work/reports/nangate45/fp8_x5y1/base/6_finish.rpt` names `ccnt[2]` as the
+worst reg-to-reg startpoint and lane 0 of cell (14,12) as the endpoint. Decode,
+distribution buffers, and three mux levels precede `fp32_add`. X5's region
+attribution assigns 1.087 ns to control/muxes and 3.315 ns to the adder.
+
+Predecode the **next** epilogue phase and register three control bits per output
+cell (256 copies), using them for both operand selection and epilogue writes.
+This retimes control without shifting the phase schedule: 21 cycles stays 21.
+The 768 registers must survive synthesis; keeping only a wire name does not
+prevent identical drivers from merging. Check the synthesized register count.
+Placement locality is a hypothesis, not something RTL hierarchy guarantees.
+
+Prediction: Y1 improves GMAC/s and moves the startpoint off `ccnt`'s epilogue
+decode. The prior 3.692 ns loop estimate corresponds to roughly 211 GMAC/s at
+II=21, an **optimistic bound, not a promised result**: local clock-to-Q, mux
+levels, lane-to-lane epilogue paths, and routing still cost time. The 4.00 ns
+target may saturate before this bound. If it does, a later matched-target pair
+must test tighter timing; no extra run is implicitly authorized by this pair.
+
+This generation cannot shorten the FP32 feedback arithmetic or hide epilogue,
+launch, or memory-transfer cycles. Those are separate experiments.
+
+### The two-run plan
+
+| trial | CTRL_REG | purpose | PIPE | RD_REG | target ns | util | hold margin ns |
+|---|---|---|---|---|---|---|---|
+| X6-Y0 | 0 | current architecture, re-baselined on the same source and host settings | 1 | 1 | 4.00 | 40 | 0.05 |
+| X6-Y1 | 1 | next-phase control registered per cell; arithmetic and interval unchanged | 1 | 1 | 4.00 | 40 | 0.05 |
+
+Expected storage: 74,252 flip-flops for Y0; 75,020 for Y1 (+768). Check the
+specific control-register population as well as total storage, since the usual
+1% total-count tolerance is too broad to establish this change reliably.
+
+Run at most these **two physical flows concurrently**, each with `NUM_CORES=32`.
+Both use identical toolchain, constraints, arithmetic, and thread limits.
+Use distinct `fp8_x6y0` and `fp8_x6y1` artifact directories and frozen source
+snapshots. Preserve all X5 artifacts and append results, including failures.
+
+### Gates and result interpretation
+
+Before launch: leaf arithmetic regression; all PIPE/RD_REG/CTRL_REG states;
+unchanged O1 ordering test; earliest-legal back-to-back operations; control-phase
+equivalence checks; synthesized control-register preservation. Each physical run
+also repeats its own simulation gate against its frozen RTL.
+
+Every completed row must report measured II and latency, reg-to-reg MHz, GMAC/s,
+limiter start/endpoints, setup and hold, DRC, GDS presence, area, and power.
+An implied frequency from negative target slack is still an estimate from STA,
+not a timing-closed operating point. No winner is signoff-clean merely because
+its DRC count is zero. Missing correctness, interval, or artifact evidence is
+not a throughput result. Report area/power tradeoffs without treating either
+as the primary objective or pretending this is an unconstrained replication
+contest.
+
+### X6 preflight, before launch
+
+Both routed configurations pass 30/30 array checks, including O1 and the new Q1
+four-instruction resident stream (all four op encodings): **II=21, actual
+start-to-done latency=20**. The old single-operation checker reports 21 because
+it observes `done` before NBA updates; that convention must not be confused
+with timestamped latency. All 38 `sim-matrix` configurations pass, including
+both leaf arithmetic regressions and all eight FP8 parameter combinations.
+
+A lightweight synthesis plus Nangate45 flop mapping retains **768 control
+drivers and 75,020 total flops**. The existing X5-Y1 mapped baseline has 74,252.
+This preflight is a structural check, **not a PPA measurement**. The first
+checker incorrectly relied on ORFS-style register instance names; generic
+synthesis used anonymous names. It now inspects actual mapped-flop Q
+connections and verifies one driver for each of the 768 cell/bit coordinates.
+Seven isolated harness tests pass, including missing/duplicate replica rejection
+and refusal to report throughput without both measured II and timing evidence.
+The full ORFS synthesis repeats the exact replica gate before placement.
+
+### X6-Y0 / X6-Y1 result — the first pair completed
+
+Both jobs exited zero (Y0: 2026-09-06 23:36 UTC; Y1: 2026-09-07 01:35 UTC).
+`CTRL_REG=0/1` gives **171.113 / 193.428 GMAC/s**, respectively, at measured
+II=21 and actual start-to-done latency=20: **+13.04% completed MAC throughput**.
+Area falls 8.24%, reported power falls 11.15%, and storage rises by the predicted
+768 flops. Both hold checks pass, both routed DRC reports are empty and both
+final GDS files exist. The full rows and path attribution are appended to
+`EXPERIMENTS.md` and summarized in `experiments/RESULTS.md`.
+
+The startpoint prediction is confirmed: `ccnt[2]` is replaced by a local
+`ep_ctrl[0]` launching through the adder into lane 2 of the same cell. The
+estimated control/mux segment falls 0.85 → 0.14 ns, while the adder segment
+grows 3.29 → 3.49 ns (two-decimal report precision). This is progress, not a
+flat row, and **not proof that the feedback loop is now the limiter**.
+
+Y1's setup slack is −0.0335012 ns (174 violations), TNS −1.29961. Therefore
+193.428 GMAC/s is an STA-implied estimate, not a timing-closed 250 MHz result.
+The near-target result leaves optimization headroom untested. The next useful
+question is whether a tighter timing objective improves the same RTL further,
+before spending another cycle or changing arithmetic. This paragraph records
+the finding; it does not launch another experiment or alter the predeclared pair.
+
+### X6-Y2 / X6-Y3 — timing-target sweep
+
+Declared 2026-09-07, after user approval and before either trial starts. The
+first pair has completed; this is the next **two** runs, not an additional
+concurrent pair. X7 scheduling changes remain conditional on what these show.
+
+Hypothesis: X6-Y1's 4.00 ns target, −0.0335012 ns setup slack and −1.29961 TNS
+leave optimizer effort untested. A tighter target may improve the same RTL's
+completed MAC throughput without adding latency or changing arithmetic.
+
+| trial | CTRL_REG | PIPE | RD_REG | target ns | throughput if target closes |
+|---|---|---|---|---|---|
+| X6-Y2 | 1 | 1 | 1 | 3.80 | 205.313 GMAC/s at II=21 |
+| X6-Y3 | 1 | 1 | 1 | 3.60 | 216.720 GMAC/s at II=21 |
+
+These are targets, **not predicted or measured results**. Both retain the X6-Y1
+RTL byte-for-byte (`sha256[0:16] = 7da8ee7a89063d22`), the same testbench,
+flow templates and tool paths, 40% utilization, 0.05 ns hold margin, and
+`NUM_CORES=32`. The target changes both the SDC and ABC objective together.
+Expected storage remains 75,020 flops, including 768 preserved local control
+drivers. The sim gate must again measure II=21 and actual latency=20.
+
+This pair measures **timing-target/optimization effort**, not the causal effect
+of `CTRL_REG`; the first matched-target pair already measured that change.
+Compare Y1/Y2/Y3 on GMAC/s, reg-to-reg slack and path start/endpoints, area,
+power, hold, DRC and GDS. Label negative-slack throughput as STA-implied; a
+chosen operating period still needs setup/hold closure. A growing timing
+violation budget and area/power cost with little throughput movement would
+support ending target tightening, not justify claiming a faster chip.
+
+Use isolated `fp8_x6y2` / `fp8_x6y3` artifacts and a new frozen snapshot at
+`work/campaigns/x6_timing/source/`. The launcher must reject reuse, verify the
+prior pair has exited, and refuse RTL/testbench/template/tool-path drift from
+the first snapshot. Each full synthesis repeats the control-driver gate.
+Only these two flows are launched; no X7 RTL or physical run is included.
+
+### X6-Y2 / X6-Y3 result — timing effort has reached a practical plateau
+
+Both trials exited zero. At targets 3.80 / 3.60 ns they produced **199.992 /
+200.208 GMAC/s**, II=21, latency=20. The last 0.20 ns of target tightening bought
+only **0.108%** throughput while power rose 14.0044 → 16.0663 W and area rose
+4176090 → 4533970 µm². Setup TNS worsened −293.433 → −4335.23; both targets
+remain unmet. Hold passes and DRC=0 for both. The startpoints are product `pr`
+in Y2 and local `ep_ctrl` in Y3, not a demonstrated accumulator-feedback limit.
+
+End this target sweep at Y2's practical operating point. This does not prove an
+absolute arithmetic floor; it establishes diminishing returns from this fix
+family. X7 changes the evidence and fix family to scheduling/operation overlap.
+
+## X7 — remove the resident-operation launch bubble
+
+Declared 2026-09-08 before RTL changes or trials. Objective remains completed
+resident-tile GMAC/s, not peak active-cycle MAC rate. Keep the X6 arithmetic,
+per-lane k order, balanced FP32 epilogue, DAZ/FTZ/RNE and canonical NaN policy.
+
+### Evidence and hypothesis
+
+X6-Y2 reaches 199.992 GMAC/s at 256.3 MHz with II=21. Only 16 of the 21 cycles
+issue useful products. The controller finishes EP2, goes idle, and uses the next
+edge solely to clear lanes and launch again. EP2 reads the OLD lane result to
+update C, so nonblocking writes can clear those lanes for the next instruction
+on that same edge. No FP32 operation needs to move or be reassociated.
+
+Hypothesis: remove this one idle/launch cycle, reaching II=20 at `PIPE=1`, while
+single-operation start-to-done latency remains 20. At unchanged clock this is
+**+5%**, about 210 GMAC/s. A clock regression of 4.76% erases the entire gain;
+rank routed GMAC/s, not the prettier II alone. Both runs use a 3.80 ns target,
+the lower-cost X6 point, with 40% utilization, hold margin 0.05 ns, 32 threads.
+
+### Interface contract — explicit completion-edge acceptance
+
+Add `start_ready` to both parameter states. A request is accepted only on a
+rising edge where `start && start_ready` and reset is inactive. The caller must
+hold `start` and `op` stable until that edge; there is **no internal request
+queue**. Pulsing start while not ready does not enqueue anything. Tile writes
+remain forbidden while executing; this experiment is for resident operands.
+
+- `CHAIN=0`: ready only in IDLE, preserving legacy start behavior; II=20+PIPE.
+- `CHAIN=1`: ready also on the current instruction's EP2 cycle. On acceptance,
+  commit OLD C, clear lane accumulators, latch the NEW op and reset ccnt on the
+  completion edge; II=19+PIPE. `done` still reports the old completion and may
+  coincide with `busy=1` for the new instruction. No request means return idle.
+- Reset deasserts ready and aborts any in-flight operation; no unaccepted
+  request is retained inside the block. The caller cancels or holds its own
+  pending request explicitly. Legacy callers waiting for !busy still work but
+  do not gain the completion-edge throughput.
+
+The product-valid pipeline and local epilogue controls must be clear of the old
+instruction at rollover. Tests must check every completion, not just the final
+C after a long stream, and must not use internal phase counters to time requests.
+
+### The first X7 pair
+
+| trial | CHAIN | PIPE | RD_REG | CTRL_REG | target ns | expected II | latency |
+|---|---|---|---|---|---|---|---|
+| X7-Y0 | 0 | 1 | 1 | 1 | 3.80 | 21 | 20 |
+| X7-Y1 | 1 | 1 | 1 | 1 | 3.80 | 20 | 20 |
+
+Y0 re-baselines the shared new port and source bytes. No intentional storage is
+added by CHAIN: expected total remains about 75,020 flops, with exactly 768
+local control flops; verify synthesis rather than infer the change from count.
+Parameter plumbing and measured II must establish that CHAIN actually reached
+the build. Use separate `fp8_x7y0` / `fp8_x7y1` artifacts and a frozen source
+snapshot. Launch at most these two physical flows, after both X6 jobs finish.
+
+### Gates, limits and stop rule
+
+Before launch: all 16 PIPE/RD_REG/CTRL_REG/CHAIN combinations, leaf arithmetic,
+the unchanged single-operation regressions and O1, per-completion C checks on
+a held-valid stream with all four formats, simultaneous done/new acceptance,
+busy-start pulses, reset during a waiting request, stop/drain/restart and a
+mutation that disables rollover. Recheck II from the trial's simulation record.
+
+This generation cannot speed up FP32 addition, remove product flush/epilogue
+cycles yet, or hide tile transfers. CHAIN's clear/acceptance fanout may cost
+clock or area; a lower II without higher GMAC/s is a negative result. More
+aggressive epilogue overlap is a later rung, not bundled into this pair. Report
+setup/hold, DRC, GDS, limiter path and area/power with throughput; negative-slack
+rates remain STA-implied, not timing-closed operating points.
+
+### X7 preflight, before launch
+
+All sixteen PIPE/RD_REG/CTRL_REG/CHAIN combinations pass 33 array checks. At
+the routed settings, the common held-valid driver measures II=21 for CHAIN=0
+and II=20 for CHAIN=1, with latency=20 for both. The chained stream observes
+three simultaneous completion/new-acceptance edges and checks every C result.
+Busy-pulse rejection, reset cancellation, fresh restart and O1 all pass.
+
+A mutation disabling the actual completion-edge restart, while leaving ready
+asserted, fails Q1 with 988 errors and reports RESULT: FAIL; the remaining 32
+checks pass. This demonstrates why isolated operations alone cannot validate
+the new handshake. Lightweight synthesis and Nangate45 flop mapping retain
+75,020 flops, including all 768 local control drivers: no storage was added.
+Seven isolated harness tests pass, including rejection of a CHAIN=1 record
+whose measured initiation interval is still 21. Both full flows will repeat
+their simulation and mapped-control checks against the frozen source.
+
+### X7-Y0 / X7-Y1 result — the interval fell, and MHz could not see it
+
+Both trials exited zero at the declared 3.80 ns target, same RTL bytes
+(`sha256[0:16] = 2d786dd038143aa3`), one parameter apart. Both have GDS, DRC=0
+and zero hold violations.
+
+| | Y0 `CHAIN=0` | Y1 `CHAIN=1` | Δ |
+|---|---|---|---|
+| reg→reg MHz | 256.7 | 256.9 | **+0.08%** |
+| initiation interval | 21 | **20** | −1 cycle |
+| start-to-done latency | 20 | 20 | unchanged |
+| **completed GMAC/s** | 200.265 | **210.467** | **+5.094%** |
+| flip-flops | 75,020 | 75,020 | **0** |
+| local control drivers | 768 | 768 | **0** |
+| stdcells | 3,213,431 | 3,207,438 | −0.19% |
+| power W | 13.8164 | 14.4541 | +4.62% |
+| energy | 14.495 GMAC/J | 14.561 GMAC/J | +0.46% |
+
+**Every prediction held, including the number.** The declaration said II=20,
+latency unchanged at 20, and "+5%, about 210 GMAC/s". Measured 210.467. It named
+its own falsifier — "a clock regression of 4.76% erases the entire gain" — and the
+clock moved +0.08%, so the result survives the test it set itself. Storage is
+exactly unchanged and verified against both routed netlists, not inferred from a
+total: `CHAIN` is a handshake and a rollover, not a register.
+
+**This row is the payoff for X6's metric change, and it is worth being explicit
+about why.** On MHz the pair is flat — +0.2 MHz, 0.08%, indistinguishable from
+noise — and a generation ranking frequency would have recorded a failed rung and
+moved to a different fix family. On completed throughput it is +5.094%. That is
+X4's lesson in a third dimension: X1–X3 could not see a 19.2× power win, X5 nearly
+credited an area saving to the wrong mechanism, and MHz cannot see an initiation
+interval at all. The difference here is that the harness was **already watching**
+for it — X6 declared the throughput metric before either of its own trials ran, so
+X7 measured the right quantity by construction rather than recovering it at close.
+
+**Why X7's prediction landed when X5's missed by 1.012 ns.** X7 predicted a
+*cycle count*, which is a property of the RTL that simulation settles before any
+physical flow runs — the preflight measured II=21/20 on a held-valid stream and
+the routed rows merely confirmed it. X5 predicted a *routed delay*, which depends
+on where the tool decides the worst path is, and the tool chose a path X5 had not
+considered. Predictions about structure are cheap to make correct; predictions
+about placement are not. That is a harness-level lesson, not a design one.
+
+Costs, stated plainly: energy per MAC is **flat** (+0.46%, inside this flow's
+power noise), so the throughput comes from using hardware that was already idle
+rather than from more hardware. Neither row closes setup, so both rates remain
+STA-implied at a register-to-register clock and neither is a timing-closed
+operating point.
+
+X7's stop rule was "a lower II without higher GMAC/s is a negative result." That
+is not what happened, so this fix family is **not** exhausted. What remains idle
+is the epilogue's three cycles; overlapping those is a further rung and a
+different generation, not an extension of this pair.
+
+### Instrument change recorded: the reg→reg STA query was wrong before X6
+
+`scripts/sta_limiter.sh` changed its `REGREG` query during this branch, and it is
+recorded here because it silently affects how earlier rows compare to later ones:
+
+```diff
+-report_checks -path_delay max -to [all_registers -data_pins] ...
++report_checks -path_delay max -from [all_registers -clock_pins] -to [all_registers -data_pins] ...
+```
+
+The old query constrained only the **endpoint**. Any path *ending* at a register
+data pin qualified — including paths starting at an **input port**, which are not
+register-to-register and do not have the clock-insertion-delay cancellation that
+is the entire justification for preferring `reg→reg fmax` over `implied_fmax`.
+With 512-bit `tile_wdata` feeding tile registers directly, such paths are real
+candidates, not hypothetical. The new query constrains both ends. **The fix is
+correct and the old number was the defective one.**
+
+**Immaterial to every X6 and X7 row.** All six have `limiter_class = reg->reg`
+with identical overall and reg→reg startpoints and endpoints, so both queries
+return the same path and the same slack. Verified in each `limiter.json`.
+
+**Material, and now unverifiable, for four `amx_tdpbssd` rows.** X2-Y2, X2-Y4,
+X3-Y0 and X4-Y0 were limited at an I/O boundary, so their headline figures were
+*substituted* from the reg→reg number: 600.3, 643.3, 658.7 and **698.9 MHz — the
+figure quoted as this campaign's operating point in `README.md`,
+`experiments/RESULTS.md` and `EXPERIMENTS.md`**. Those were computed with the
+loose query. Whether any of them included an input-port launch cannot now be
+determined: X4's "Recovered, not re-measured" recovery was legitimate precisely
+because every `6_final.odb/.sdc/.spef` was still on disk, and those
+`amx_tdpbssd` artifacts have since been deleted. `work/results/nangate45/` holds
+only `fp8*` and `my_chip_n4_c1`.
+
+So those four figures are **labelled, not corrected**: measured with a query that
+could admit an input-port launch, on a design whose input ports feed registers
+directly, with the evidence to check now gone. Re-deriving them means re-running
+four ~40-minute flows. Nothing in X5, X6 or X7 depends on them — the `amx_fp8`
+campaign is self-contained and post-fix — but the INT8-vs-FP8 comparison in
+`EXPERIMENTS.md` uses 698.9 MHz as its INT8 anchor, so that ratio inherits the
+same caveat and should be read as approximate until the row is re-run.

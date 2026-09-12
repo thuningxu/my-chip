@@ -9,18 +9,24 @@ read from `6_report.json`, counted in `6_final.v`, or produced by
 which family of fix gets proposed). **Y** = an RTL attempt inside that generation.
 A Y failing implicates the design; an X row going flat implicates the harness.
 
-**Two designs, kept apart.** X1–X4 climbed **`amx_tdpbssd`**; X5 onward climbs
+**Two designs, kept apart.** X1–X4 climbed **`amx_tdpbssd`**; **X5–X7** climb
 **`amx_fp8`**. `trials.py` groups by design, because a delta between two designs is
 a number with no referent. Everything below the `amx_tdpbssd` heading is that
-campaign; X5 has its own section at the end.
+campaign; X5, X6 and X7 have their own sections at the end.
 
 **`amx_tdpbssd` status: closed at X4.** The design is limited by a multiplier
 carry-propagate at **~703 MHz** and is efficient at **~699 MHz / 2.436 W**. Ten
-trials, one RTL defect count of zero, twelve tooling defects.
+trials, one RTL defect count of zero, twelve tooling defects. Four of its rows
+carry an instrument caveat — see the note at the end of this file.
 
-**`amx_fp8` status: X5 open, one logged trial.** `PIPE=1` reaches **212.6 MHz
-`reg→reg`** at −65% power, and falsified X5's own floor. See
-[X5](#x5--amx_fp8-registering-the-product) below.
+**`amx_fp8` status: X7 open, seven logged trials.** Best completed resident-tile
+throughput is **210.467 GMAC/s** at 256.9 MHz, `PIPE=1 RD_REG=1 CTRL_REG=1
+CHAIN=1`, initiation interval 20 and latency 20 — **+45.6%** over X5-Y0's
+144.6 GMAC/s. The objective changed at X6 from MHz to completed throughput, and
+X7 is the row that proved the change was necessary: **+5.094% throughput at
++0.08% clock**. See [X5](#x5--amx_fp8-registering-the-product),
+[X6](#x6--amx_fp8-local-epilogue-control) and
+[X7](#x7--amx_fp8-the-initiation-interval).
 
 ## Read this first: which frequency column is real
 
@@ -242,3 +248,86 @@ tree and through mux select pins, and only then enters the adder.
 **The accumulate loop X5 named as its floor has never been the limiter** — p1, Y0
 and Y1 all launch from `ccnt`, at both `PIPE` settings and on both platforms. X6 is
 therefore a *control*-pipelining generation, not another datapath one.
+
+## X6 — `amx_fp8`, local epilogue control
+
+Both runs completed, with identical `PIPE=1 RD_REG=1`, 4.00 ns target, 40%
+utilization, 0.05 ns hold margin and 32 threads. Only `CTRL_REG` differs.
+
+| trial | CTRL_REG | reg→reg MHz | measured II | latency cycles | GMAC/s | setup WS ns | TNS | hold WS ns | flops | cells | area µm² | power W | DRC |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| X6Y0 | 0 | 219.3 | 21 | 20 | 171.113 | −0.559528 | −8779.11 | +0.0443583 | 74252 | 3423820 | 4336630 | 14.1854 | 0 |
+| X6Y1 | 1 | **247.9** | 21 | 20 | **193.428** | −0.0335012 | −1.29961 | +0.0434359 | 75020 | 2984378 | 3979430 | 12.6034 | 0 |
+
+**+13.04% resident-tile MAC throughput**, −8.24% area and −11.15% reported
+power, with 768 more flops. Both hold checks pass, both GDS files exist, and
+both jobs exited zero. These throughput figures use STA-implied clocks and
+exclude tile transfers. Y1 still has 174 setup violations and is **not**
+timing-closed at 250 MHz.
+
+The limiter moves from global `ccnt[2]` to local cell (4,5) `ep_ctrl[0]`, through
+the FP32 adder into lane 2. The register-distribution hypothesis worked; the
+pure accumulator feedback loop is still not the measured limiter. See
+[`EXPERIMENTS.md`](../EXPERIMENTS.md#x6-findings--local-epilogue-control-improves-completed-mac-throughput)
+for path-region attribution, buffer-area accounting and artifact provenance.
+No further physical runs have been started.
+
+### X6 timing sweep completed
+
+| trial | target ns | reg→reg MHz | II | GMAC/s | setup WS ns | TNS | hold WS ns | area µm² | power W | DRC |
+|---|---|---|---|---|---|---|---|---|---|---|
+| X6Y2 | 3.80 | 256.3 | 21 | 199.992 | −0.101071 | −293.433 | +0.0438729 | 4176090 | 14.0044 | 0 |
+| X6Y3 | 3.60 | 256.6 | 21 | 200.208 | −0.296873 | −4335.23 | +0.0201836 | 4533970 | 16.0663 | 0 |
+
+Both runs succeeded with GDS and hold met, but setup targets unmet. Y3's
+**0.108%** throughput increase costs 14.72% more power and 8.57% more area.
+X7 uses Y2's 3.80 ns target as its matched baseline setting and changes the
+fix family to completion-edge launch. These remain resident-tile STA estimates.
+
+---
+
+## X7 — `amx_fp8`, the initiation interval
+
+Resident-tile completed throughput, ranked. `trials.py --throughput` generates
+this; historical rows without a measured initiation interval are omitted rather
+than backfilled.
+
+```
+  trial      CTRL CHAIN GMAC/s    MHz     II  latency  hold ns   DRC  result
+  x7y1       1    1      210.467   256.9  20       20  +0.0453    0  OK
+  x7y0       1    0      200.265   256.7  21       20  +0.0412    0  OK
+  x6y3       1    0      200.208   256.6  21       20  +0.0202    0  OK
+  x6y2       1    0      199.992   256.3  21       20  +0.0439    0  OK
+  x6y1       1    0      193.428   247.9  21       20  +0.0434    0  OK
+  x6y0       0    0      171.113   219.3  21       20  +0.0444    0  OK
+```
+
+### The like-for-like comparisons
+
+| pair | target | change | Δ MHz | Δ GMAC/s |
+|---|---|---|---|---|
+| X6-Y0 → X6-Y1 | 4.00 | `CTRL_REG` 0→1 | +28.6 (219.3 → 247.9) | **+13.04%** |
+| X6-Y2 → X6-Y3 | 3.80 → 3.60 | target only | +0.3 | +0.108% — plateau |
+| **X7-Y0 → X7-Y1** | 3.80 | `CHAIN` 0→1 | **+0.2 (flat)** | **+5.094%** |
+
+**Read the last row twice.** `CHAIN` moved the clock 0.08% and completed
+throughput 5.094%, because the initiation interval fell 21 → 20 at unchanged
+latency. Ranked on MHz it is a flat rung and would have been discarded. This is
+why X6 changed the objective from MHz to completed GMAC/s *before* running its own
+trials, and X7 is the row that collected on it.
+
+`amx_fp8` end to end, X5-Y0 → X7-Y1: **144.6 → 210.5 GMAC/s, +45.6%**, at
+21 → 20 cycles of interval and 40.2 → 14.5 W. Every step is a matched-target pair
+except the deliberate 3.80 ns target move, which is labelled.
+
+### One caveat that reaches backwards
+
+`scripts/sta_limiter.sh`'s reg→reg query was corrected during X6 — it previously
+constrained only the endpoint, admitting input-port launches that are not
+register-to-register. Immaterial to all six X6/X7 rows (verified: overall and
+reg→reg share start and endpoints on every one). **Material to the four
+`amx_tdpbssd` rows whose headline was substituted from the reg→reg figure**, one
+of which is the 698.9 MHz operating point used as the INT8 anchor in
+`EXPERIMENTS.md`. Those artifacts are deleted, so the figures are labelled rather
+than corrected. See the instrument-change note in
+[`harness.md`](harness.md#instrument-change-recorded-the-regreg-sta-query-was-wrong-before-x6).

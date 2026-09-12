@@ -277,9 +277,20 @@ clamp sits there and nowhere else.
 |---|---|---|
 | `PIPE` | 0 | **0..1**, asserted at elaboration. `1` registers the fp8 product at the FP32 adder's input. Latency becomes `20 + PIPE` cycles; **throughput is unchanged** at one k-step per cycle |
 | `RD_REG` | 1 | registers `rd_data`, one extra cycle of *readback* latency. Defaulted on because both prior designs measured the same thing: a multi-level readback mux driving an output port becomes the critical path, and half of its arrival is clock insertion delay that cannot cancel, because a port has no capture flop to offset it |
+| `CTRL_REG` | 0 | X6 experiment: three next-phase epilogue control flops per output cell (768 total), preserved through synthesis. Same arithmetic and cycle schedule; no routed improvement claimed yet |
+| `CHAIN` | 0 | X7: accept a held request on the current EP2/completion edge. II becomes `19+PIPE` instead of `20+PIPE`; actual start-to-done latency stays `19+PIPE`. No internal queue |
 
-Both change the hardware, so `make sim-matrix` builds all four combinations —
+All four change the hardware, so `make sim-matrix` builds all sixteen combinations —
 a parameter only ever shipped in one state is dead code with a name.
+
+`start_ready` is present in both CHAIN settings. Sample acceptance as
+`start && start_ready` on a rising edge; the caller holds `start` and `op`
+stable until that edge. At `CHAIN=0`, readiness means IDLE. At `CHAIN=1` it also
+includes EP2, allowing old C to commit while lanes clear and a new op is latched.
+`done` can then coincide with `busy=1`; it means a completion, not necessarily
+an idle array. A pulse while not ready is ignored, not queued. Reset deasserts
+ready and cancels the active operation; tile writes remain forbidden while busy.
+Legacy callers that wait for !busy remain valid but do not get the lower II.
 
 **The product register is 16 bits per lane, not 32.** `fp8_mul` returns
 `{sgn, e_fld, nrm[6:0], 16'd0}`, because a product of two 4-bit significands has

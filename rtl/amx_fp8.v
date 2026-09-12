@@ -136,7 +136,13 @@ module amx_fp8 #(
     // port has no capture flop to contribute an offsetting delay. Carried from
     // the start rather than rediscovered a third time. Both states stay
     // buildable so the claim is re-measured here, not assumed.
-    parameter integer RD_REG = 1
+    parameter integer RD_REG = 1,
+    // X6: predecode the NEXT epilogue phase and register it per output cell.
+    // No new datapath stage, no extra cycle, and no change to FP32 add order.
+    parameter integer CTRL_REG = 0,
+    // X7: accept a held next request on the current completion edge.
+    // No internal queue; start/op obey the start_ready handshake below.
+    parameter integer CHAIN = 0
 )(
     input  wire         clk,
     input  wire         rst_n,
@@ -154,6 +160,9 @@ module amx_fp8 #(
     input  wire         start,
     output reg          busy,
     output reg          done,
+    // Sample start && start_ready on a rising edge. Hold start/op until then.
+    // With CHAIN=1, done may be high while busy stays high for the next op.
+    output wire         start_ready,
 
     // ---- tile read, one row per cycle ------------------------------------
     input  wire [1:0]   rd_sel,
@@ -218,6 +227,8 @@ module amx_fp8 #(
     // ---- control ------------------------------------------------------------
     wire run    = (state == S_RUN);
     wire c_last = (ccnt == EP2[CW-1:0]);
+    assign start_ready = rst_n && ((state == S_IDLE) || ((CHAIN != 0) && run && c_last));
+    wire chain_accept = (CHAIN != 0) && run && c_last && start;
 
     // kcnt is only meaningful while sel_valid; in the epilogue, and during the
     // PIPE flush cycles, the low bits of ccnt select a k nobody accumulates.
@@ -231,10 +242,23 @@ module amx_fp8 #(
     wire       ep1       = run && (ccnt == EP1[CW-1:0]);
     wire       ep2       = run && (ccnt == EP2[CW-1:0]);
 
+    // At an edge with ccnt=EPx-1, both ccnt and the registered phase advance
+    // together. Delaying ep0/ep1/ep2 themselves would be one cycle TOO LATE.
+    // run clears all three bits on the start edge and after the finish edge.
+    localparam integer PRE_EP0 = EP0 - 1;
+    localparam integer PRE_EP1 = EP1 - 1;
+    localparam integer PRE_EP2 = EP2 - 1;
+    wire [2:0] ep_next = {run && (ccnt == PRE_EP2[CW-1:0]),
+                          run && (ccnt == PRE_EP1[CW-1:0]),
+                          run && (ccnt == PRE_EP0[CW-1:0])};
+
     // Clearing the lane accumulators on the START edge costs no cycle: the edge
     // that moves IDLE->RUN is already there, and ccnt==0 executes on the edge
     // after it.
-    wire lane_clr = (state == S_IDLE) && start;
+    // On a chained completion, C samples the OLD epilogue sum while the lane
+    // registers clear for the next instruction on that same edge. NBA semantics
+    // preserve the arithmetic; clearing one edge earlier would destroy the sum.
+    wire lane_clr = ((state == S_IDLE) && start) || chain_accept;
 
     // sel_valid delayed, so lane b is enabled exactly when ITS product emerges
     // from the product register -- the same 16-pulse train, PIPE cycles later.
@@ -313,9 +337,16 @@ module amx_fp8 #(
                 end
                 S_RUN: begin
                     if (c_last) begin
-                        state <= S_IDLE;
-                        busy  <= 1'b0;
                         done  <= 1'b1;
+                        if (CHAIN != 0 && start) begin
+                            ccnt  <= {CW{1'b0}};
+                            op_r  <= op;
+                            state <= S_RUN;
+                            busy  <= 1'b1;
+                        end else begin
+                            state <= S_IDLE;
+                            busy  <= 1'b0;
+                        end
                     end else begin
                         ccnt <= ccnt + {{(CW-1){1'b0}}, 1'b1};
                     end
@@ -392,6 +423,22 @@ module amx_fp8 #(
     generate
         for (gm = 0; gm < ROWS; gm = gm + 1) begin : g_m
             for (gn = 0; gn < DWORDS; gn = gn + 1) begin : g_n
+
+                wire [2:0] ep_local;
+                if (CTRL_REG != 0) begin : g_ctrl_reg
+                    (* keep = 1 *) reg [2:0] ep_ctrl;
+                    // The PROCESS attribute is essential: proc_dff copies it
+                    // onto the cells, preventing opt_merge from collapsing 256
+                    // identical banks into one global driver. A kept wire alone
+                    // does not establish local replication. Verify after synth.
+                    (* keep = 1 *) always @(posedge clk or negedge rst_n) begin
+                        if (!rst_n) ep_ctrl <= 3'b000;
+                        else        ep_ctrl <= ep_next;
+                    end
+                    assign ep_local = ep_ctrl;
+                end else begin : g_ctrl_comb
+                    assign ep_local = {ep2, ep1, ep0};
+                end
 
                 // Four FP32 lane accumulators, packed so ONE always block drives
                 // them. Cleared to +0 on the start edge.
@@ -470,12 +517,12 @@ module amx_fp8 #(
                     // is the whole reason EP0 had to move to KDW+PIPE.
                     wire [ACC_W-1:0] opb;
                     if (gb == 0) begin : g_opb0
-                        assign opb = ep0 ? lacc[1*ACC_W +: ACC_W]
-                                   : ep1 ? lacc[2*ACC_W +: ACC_W]
-                                   : ep2 ? cacc[gm][gn]
+                        assign opb = ep_local[0] ? lacc[1*ACC_W +: ACC_W]
+                                   : ep_local[1] ? lacc[2*ACC_W +: ACC_W]
+                                   : ep_local[2] ? cacc[gm][gn]
                                          : prod_e[0*ACC_W +: ACC_W];
                     end else if (gb == 2) begin : g_opb2
-                        assign opb = ep0 ? lacc[3*ACC_W +: ACC_W]
+                        assign opb = ep_local[0] ? lacc[3*ACC_W +: ACC_W]
                                          : prod_e[2*ACC_W +: ACC_W];
                     end else begin : g_opb_plain
                         assign opb = prod_e[gb*ACC_W +: ACC_W];
@@ -501,9 +548,9 @@ module amx_fp8 #(
                     // correctness one -- said plainly so the surviving mutation
                     // is not mistaken for a gap in the testbench.
                     if (gb == 0) begin : g_en0
-                        assign len[gb] = acc_phase | ep0 | ep1;
+                        assign len[gb] = acc_phase | ep_local[0] | ep_local[1];
                     end else if (gb == 2) begin : g_en2
-                        assign len[gb] = acc_phase | ep0;
+                        assign len[gb] = acc_phase | ep_local[0];
                     end else begin : g_en_plain
                         assign len[gb] = acc_phase;
                     end
@@ -529,7 +576,7 @@ module amx_fp8 #(
                 always @(posedge clk) begin
                     if (tile_we && tile_sel == SEL_C && tile_row == gm)
                         cacc[gm][gn] <= tile_wdata[gn*ACC_W +: ACC_W];
-                    else if (ep2)
+                    else if (ep_local[2])
                         cacc[gm][gn] <= sum[0*ACC_W +: ACC_W];
                 end
             end
@@ -568,6 +615,14 @@ module amx_fp8 #(
 
     // ---- elaboration-time checks -------------------------------------------
     initial begin
+        if (CHAIN != 0 && CHAIN != 1) begin
+            $display("FATAL: CHAIN must be 0 or 1 (got %0d)", CHAIN);
+            $finish;
+        end
+        if (CTRL_REG != 0 && CTRL_REG != 1) begin
+            $display("FATAL: CTRL_REG must be 0 or 1 (got %0d)", CTRL_REG);
+            $finish;
+        end
         if (RD_REG != 0 && RD_REG != 1) begin
             $display("FATAL: RD_REG must be 0 or 1 (got %0d)", RD_REG);
             $finish;

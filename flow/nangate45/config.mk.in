@@ -25,7 +25,7 @@ export SDC_FILE      = @CFG_DIR@/constraint.sdc
 #              track N*N*ACC_W + control at both N=4 and N=16)
 # amx_tdpbssd: SAT <s> PIPE <p> RD_REG <r>
 # tpu_mmu:     N <n> RD_REG <r>
-# amx_fp8:     RD_REG <r>                   (the four instructions are a RUNTIME
+# amx_fp8:     PIPE <p> RD_REG <r> CTRL_REG <c> (the four instructions are a RUNTIME
 #              input op[1:0], not a build parameter -- one netlist runs all of
 #              TDPBF8PS/TDPBHF8PS/TDPHBF8PS/TDPHF8PS)
 export VERILOG_TOP_PARAMS = @TOP_PARAMS@

@@ -37,6 +37,20 @@ seconds instead of while debugging Verilog.
 
 ## amx_fp8: verify the leaves first, then only the schedule
 
+X6 adds `CTRL_REG=0/1`, giving eight FP8 parameter combinations and 30 checks
+per combination. Q1 runs four resident instructions back-to-back, changes the
+format each time, checks the final C chain, and measures start/completion edge
+intervals. At `PIPE=1` it establishes II=21 and start-to-completion latency=20;
+no reload or readback is hidden between operations. Every local epilogue control
+bank is also checked against the original phase equations on every cycle.
+
+X7 adds `CHAIN=0/1`, sixteen FP8 combinations and 33 checks per combination.
+Q1 now holds each request until the public `start_ready` handshake, checks C on
+every completion and verifies simultaneous done/new acceptance. The same driver
+measures II=21/20 at `PIPE=1`, with latency=20 in both. R1 tests ignored early
+busy pulses, R2 tests reset/withdrawal of a waiting request, and R3 restarts with
+a new format after reset. The final external readback still checks tile readout.
+
 The FP8 design inverts the usual order, because its arithmetic is the risk. A
 rounding bug in `fp32_add` would appear 1024 instances deep inside a 16-cycle
 accumulation, presenting as "some matrix elements are off by an ulp" — which is
