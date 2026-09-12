@@ -111,7 +111,7 @@ read_spef $R/6_final.spef
 puts "===OVERALL"
 report_checks -path_delay max -group_path_count 1 -digits 4 -fields {}
 puts "===REGREG"
-report_checks -path_delay max -to [all_registers -data_pins] -group_path_count 1 -digits 4 -fields {}
+report_checks -path_delay max -from [all_registers -clock_pins] -to [all_registers -data_pins] -group_path_count 1 -digits 4 -fields {}
 puts "===END"
 EOF
 
@@ -132,21 +132,22 @@ def section(a, b):
     return txt.split(a)[1].split(b)[0]
 
 def info(block):
+    sp = re.search(r'Startpoint: (\S+)', block)
     ep = re.search(r'Endpoint: (\S+)(.*)', block)
     sl = re.search(r'(-?[\d.]+)\s+slack \((MET|VIOLATED)\)', block)
     # No fallback. A missing match means the report is not what we think it is,
     # and a guessed class is worse than no class at all.
-    if not ep or not sl:
-        return None, None, None
+    if not sp or not ep or not sl:
+        return None, None, None, None
     head = block.split('Endpoint')[0]
     outp = 'output port' in ep.group(2)
     inp  = 'input port' in head
     cls = 'IN->OUT' if (inp and outp) else ('OUT-PORT' if outp else 'reg->reg')
-    return cls, float(sl.group(1)), ep.group(1)
+    return cls, float(sl.group(1)), ep.group(1), sp.group(1)
 
 try:
-    ocls, ows, oep = info(section('===OVERALL', '===REGREG'))
-    rcls, rws, rep = info(section('===REGREG', '===END'))
+    ocls, ows, oep, osp = info(section('===OVERALL', '===REGREG'))
+    rcls, rws, rep, rsp = info(section('===REGREG', '===END'))
 except (IndexError, AttributeError) as e:
     print(json.dumps({"nick": nick, "error": "unparseable STA output: %s" % e}))
     sys.exit(0)
@@ -156,7 +157,8 @@ if ocls is None:
     sys.exit(0)
 
 rec = {"nick": nick, "limiter_class": ocls, "overall_ws_ns": ows,
-       "overall_endpoint": oep, "regreg_ws_ns": rws, "regreg_endpoint": rep}
+       "overall_endpoint": oep, "overall_startpoint": osp,
+       "regreg_ws_ns": rws, "regreg_endpoint": rep, "regreg_startpoint": rsp}
 # Sanity: the reg-to-reg path can never be better-constrained than the overall
 # worst path, since it is a subset of the same path set.
 if rws is not None and rws < ows - 1e-6:

@@ -1275,3 +1275,155 @@ agree on the default, so the guard is satisfied while the requested configuratio
 never built. Every `PIPE` row on record came through `trial.sh`, which does pass it,
 so no published row is affected; but the `make` route to a `PIPE` row was dead for the
 whole amx campaign.
+
+## X6 findings — local epilogue control improves completed MAC throughput
+
+Completed 2026-09-07. The declared pair differs only in `CTRL_REG`, on the same
+frozen RTL (`sha256[0:16] = 7da8ee7a89063d22`), host and flow settings:
+`PIPE=1 RD_REG=1`, 4.00 ns, utilization 40%, hold margin 0.05 ns, 32 threads
+per run. Both jobs exited zero. These are **routed STA estimates**, Nangate45
+typical corner, not measured silicon performance or signoff.
+
+| row | trial | CTRL_REG | stage | target ns | reg→reg MHz | measured II | actual latency | GMAC/s | setup WS ns | setup TNS | hold WS ns | hold violations | DRC | flops | stdcells | stdcell area µm² | power W |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| p4 | X6-Y0 | 0 | routed | 4.00 | 219.3 | 21 | 20 | 171.113 | −0.559528 | −8779.11 | +0.0443583 | 0 | 0 | 74252 | 3423820 | 4336630 | 14.1854 |
+| p5 | X6-Y1 | 1 | routed | 4.00 | 247.9 | 21 | 20 | **193.428** | −0.0335012 | −1.29961 | +0.0434359 | 0 | 0 | 75020 | 2984378 | 3979430 | 12.6034 |
+
+Throughput is `16384 / (II * implied_period_ns)` GMAC/s, using the four-decimal
+reg-to-reg slack recorded by the timing helper, not the rounded MHz column.
+Q1 measures both launch and completion intervals over four consecutive resident
+instructions, all four format encodings, with no reload/readback between them.
+The original single-operation checker counts 21 edges because it samples `done`
+before NBA updates; timestamped start-to-done latency is 20. Neither number is
+inferred from the other. Tile transfers are excluded from this throughput.
+
+### The attributable gain
+
+Y0 → Y1 is **+13.04% throughput**, −12.83% stdcells, −8.24% stdcell area and
+−11.15% reported power, at the cost of exactly 768 additional flip-flops. II
+does not change, so this pair's frequency gain and throughput gain coincide.
+Compare against **X6-Y0**, not X5-Y1's 165.9 GMAC/s: the new baseline itself is
+171.1 GMAC/s. That movement is not a benefit of `CTRL_REG`, and this pair does
+not isolate which flow/run differences caused it.
+
+The cell-class budget again identifies the area mechanism: timing-repair buffer
+area falls **605326 → 232342 µm²** (−372984), sequential area grows by 4660,
+and other classes grow by 11124, summing to the −357200 total. The repair-buffer
+saving exceeds the whole area saving. Do not label this a glitch-power result:
+the power mechanisms were not separately measured.
+
+### The startpoint prediction is confirmed, but the feedback limit is not reached
+
+The final reports identify:
+
+- Y0: `ccnt[2] → control decode/distribution → fp32_add → cacc[154][5]`.
+- Y1: cell (4,5) `ep_ctrl[0] → local buffer/mux → fp32_add → lacc[69]` (lane 2).
+
+Approximate region delays from the reports' two-decimal arrival columns:
+
+| region, launch Q to capture D | Y0 ns | Y1 ns |
+|---|---|---|
+| control distribution and operand mux, before the adder | 0.85 | 0.14 |
+| FP32 adder, including in-module routing | 3.29 | 3.49 |
+| tail after the adder | 0.11 | 0.11 |
+| total data-path delay | 4.25 | 3.74 |
+
+The long global control path is removed as intended. Some of the saving is
+offset by a slower adder segment in the new implementation. The worst path
+**still starts on control**, now local control, not on the lane accumulator;
+claiming the pure feedback loop is now the limiter would repeat X5's mistake.
+
+Y1 remains **33.5 ps short of the 4.00 ns target**, with 174 setup violations,
+despite DRC=0 and hold passing. It is not timing-closed at 250 MHz. TNS near
+zero also means this pair cannot establish that 247.9 MHz is the architecture's
+ceiling. A tighter-target experiment is a sensible next test of optimization
+headroom; none is launched as part of these two trials.
+
+### Artifacts and verification
+
+Both frozen-source sim gates pass 30/30, II=21 and latency=20. The full parameter
+regression passed 38 configurations before launch. ORFS synthesis verified all
+768 distinct mapped control drivers for Y1 before placement; routed total-flop
+counts match 74252/75020. Both GDS files are present: **3519393480 bytes** (Y0)
+and **3294862860 bytes** (Y1), with empty final routed DRC reports.
+
+Trial rows are in `experiments/trials.jsonl`; frozen inputs and wrapper logs
+are in `work/campaigns/x6/`. Final path reports are
+`work/reports/nangate45/fp8_x6y{0,1}/base/6_finish.rpt` and timing classifications
+are in `work/logs/nangate45/fp8_x6y{0,1}/base/limiter.json`. Reprint the ranking
+with `python3 scripts/trials.py --throughput`. Final supervisor statuses are
+`EXIT 0` at 2026-09-06 23:36 UTC (Y0) and 2026-09-07 01:35 UTC (Y1).
+
+### X6 target sweep — p6/p7 close the timing-effort question
+
+The unchanged `PIPE=1 RD_REG=1 CTRL_REG=1` RTL was run at two tighter targets,
+with the same hold margin, utilization and 32-thread limit. Both jobs exited
+zero, both have GDS, DRC=0 and zero hold violations. Rates exclude transfers
+and use STA-implied register-to-register clocks; neither target closes setup.
+
+| row | trial | target ns | reg→reg MHz | II | GMAC/s | setup WS ns | TNS | hold WS ns | flops | stdcells | area µm² | power W |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| p6 | X6-Y2 | 3.80 | 256.3 | 21 | 199.992 | −0.101071 | −293.433 | +0.0438729 | 75020 | 3212415 | 4176090 | 14.0044 |
+| p7 | X6-Y3 | 3.60 | 256.6 | 21 | 200.208 | −0.296873 | −4335.23 | +0.0201836 | 75020 | 3638456 | 4533970 | 16.0663 |
+
+Y2 → Y3 buys just **0.108%** throughput for **14.72%** more reported power
+and **8.57%** more area. The worst paths start at the product register (Y2) and
+local epilogue control (Y3), so this does not prove the feedback loop is the
+absolute floor. It does make Y2 the practical X6 throughput point for the next
+matched pair. X7 will test initiation interval rather than continue increasing
+timing effort. GDS sizes are 3400056578 / 3631494594 bytes; full records and
+start/endpoints are in `experiments/trials.jsonl`.
+
+## X7 findings — one cycle of initiation interval, worth 5.1% that MHz cannot see
+
+Generation declared in [`experiments/harness.md`](experiments/harness.md) on
+2026-09-08, before any RTL change or trial. `CHAIN=1` accepts the next operation
+on the current one's EP2 edge instead of waiting for IDLE, committing old `C` and
+clearing the lane accumulators on that same edge. No FP32 operation moves and
+nothing is reassociated.
+
+Matched pair: same 3.80 ns target, same `PIPE=1 RD_REG=1 CTRL_REG=1`, same hold
+margin, utilization and 32-thread limit, same RTL bytes
+(`sha256[0:16] = 2d786dd038143aa3`), one parameter apart. Both exited zero, both
+have GDS, DRC=0 and zero hold violations.
+
+| row | trial | CHAIN | target ns | reg→reg MHz | II | latency | GMAC/s | setup WS ns | hold WS ns | flops | stdcells | power W |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| p8 | X7-Y0 | 0 | 3.80 | 256.7 | 21 | 20 | 200.265 | −0.0958469 | +0.0454 | 75020 | 3213431 | 13.8164 |
+| p9 | X7-Y1 | 1 | 3.80 | 256.9 | **20** | 20 | **210.467** | −0.0923084 | +0.0459 | 75020 | 3207438 | 14.4541 |
+
+**+5.094% completed MAC throughput for +0.08% clock.** The clock did not move —
+256.7 → 256.9 MHz is inside any reasonable noise band — and the entire gain is the
+initiation interval falling 21 → 20 while start-to-done latency stays 20.
+
+**This is the row that justifies X6's metric change.** Ranked on MHz this pair is
+flat to three decimal places and would have been discarded as a failed rung.
+Ranked on completed throughput it is the second-largest single-parameter win in
+the `amx_fp8` campaign. It is the same lesson as X4's power finding — a hillclimb
+that ranks one scalar cannot see a Pareto move — arriving in a third dimension,
+and this time the harness was already watching for it rather than discovering it
+at close.
+
+**Storage is exactly unchanged: 75,020 flops both sides, 768 local control
+drivers both sides**, verified against the routed netlists rather than inferred
+from a total. `CHAIN` is a handshake and a rollover, not a register.
+
+The declaration's prediction held, including the number: it predicted II=20,
+latency unchanged at 20, and "+5%, about 210 GMAC/s". Measured 210.467. It also
+named its own falsifier — "a clock regression of 4.76% erases the entire gain" —
+and the measured clock moved +0.08%, so the gain survives its own stated test.
+That is a sharp contrast with X5, whose central prediction missed by 1.012 ns, and
+the difference is instructive: X7 predicted a *cycle count*, which is a property of
+the RTL that simulation can settle before any flow runs, while X5 predicted a
+*routed delay*, which depends on where the tool decides the worst path is.
+
+Costs, stated plainly: reported power rises 4.62% (13.8164 → 14.4541 W) and
+stdcells fall 0.19%, so **energy per MAC is flat** — 14.495 → 14.561 GMAC/J,
++0.46%, which is inside this flow's noise for power. The throughput is bought with
+utilization of hardware already present, not with more hardware.
+
+**Neither row closes setup**, so both rates are STA-implied at a
+register-to-register clock, not timing-closed operating points. The X7 stop rule
+was "a lower II without higher GMAC/s is a negative result"; that is not what
+happened, so the fix family is not exhausted — but the remaining idle cycles are
+the epilogue's three, and overlapping those is a different generation.
