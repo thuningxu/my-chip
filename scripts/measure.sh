@@ -30,6 +30,8 @@ OUTPAR=0
 SAT=1
 PIPE=0
 RDREG=0
+CTRLREG=0
+CHAIN=0
 # tpu_mmu array dimension. Named TN, not N: N is already mac_array's size and
 # silently reusing it would let `-n 4` build a 16-MAC systolic array by accident.
 TN=32
@@ -50,6 +52,8 @@ while [[ $# -gt 0 ]]; do
     -s) SAT="$2"; shift 2 ;;
     -P) PIPE="$2"; shift 2 ;;
     -R) RDREG="$2"; shift 2 ;;
+    --ctrl-reg) CTRLREG="$2"; shift 2 ;;
+    --chain) CHAIN="$2"; shift 2 ;;
     -T) TN="$2"; shift 2 ;;
     -p) PERIOD="$2"; shift 2 ;;
     -u) UTIL="$2"; shift 2 ;;
@@ -108,7 +112,7 @@ case "$DESIGN" in
     RTL_LIST="$HERE/rtl/amx_fp8.v $HERE/rtl/fp8_mul.v $HERE/rtl/fp32_add.v"
     TB_FILE="$HERE/tb/tb_amx_fp8.v"
     # The four instructions are a RUNTIME input (op[1:0]), not a build
-    # parameter, so PIPE and RD_REG are the only things to configure.
+    # parameter. CTRL_REG retimes epilogue control without adding a cycle.
     #
     # PIPE HAS TO BE IN ALL THREE OF THESE. Range here is 0..1, not amx_tdpbssd's
     # 0..3, and it moves a register into the product path -- so it changes the
@@ -116,9 +120,10 @@ case "$DESIGN" in
     # drift the guard below exists for: that omission once had the gate simulate
     # PIPE=1 while the flow built PIPE=0, and the trial logged a duplicate of its
     # own baseline under the other configuration's name.
-    TOP_PARAMS="PIPE $PIPE RD_REG $RDREG"
-    SIM_PARAMS=(-Ptb_amx_fp8.PIPE="$PIPE" -Ptb_amx_fp8.RD_REG="$RDREG")
-    CFG_DESC="PIPE=$PIPE RD_REG=$RDREG"
+    TOP_PARAMS="PIPE $PIPE RD_REG $RDREG CTRL_REG $CTRLREG CHAIN $CHAIN"
+    SIM_PARAMS=(-Ptb_amx_fp8.PIPE="$PIPE" -Ptb_amx_fp8.RD_REG="$RDREG"
+                -Ptb_amx_fp8.CTRL_REG="$CTRLREG" -Ptb_amx_fp8.CHAIN="$CHAIN")
+    CFG_DESC="PIPE=$PIPE RD_REG=$RDREG CTRL_REG=$CTRLREG CHAIN=$CHAIN"
     # See config.mk.in: `share` cannot help a design whose 1024 adders all run
     # every cycle, and it does not terminate in reasonable time on this one.
     SYNTH_ARGS="-noshare"
@@ -167,7 +172,13 @@ if [[ $RUN_SIM -eq 1 ]]; then
   # file set has to be the synthesised one for the same reason.
   iverilog -g2005 -o "$SIMDIR/tb.vvp" \
     "${SIM_PARAMS[@]}" "$TB_FILE" $RTL_LIST
-  if ! vvp "$SIMDIR/tb.vvp" | tee "$SIMDIR/sim.log" | grep -q "^RESULT: PASS"; then
+  # Let vvp and tee finish before inspecting the log. grep -q in the pipeline
+  # can close its input early and turn a passing sim into a pipefail/SIGPIPE.
+  if ! vvp "$SIMDIR/tb.vvp" | tee "$SIMDIR/sim.log"; then
+    echo "FATAL: simulator failed -- refusing to produce a PPA number." >&2
+    exit 1
+  fi
+  if ! grep -q '^RESULT: PASS$' "$SIMDIR/sim.log" || grep -q '^RESULT: FAIL' "$SIMDIR/sim.log"; then
     echo "FATAL: regression FAILED -- refusing to produce a PPA number." >&2
     grep -E "\[FAIL\]|RESULT:" "$SIMDIR/sim.log" >&2 || true
     exit 1
@@ -182,6 +193,10 @@ fi
 # (variables.mk:13) relocates the design tree. Both are overridable, so the
 # ORFS clone stays pristine and this repo owns its own artifacts.
 WORK="$HERE/work"
+mkdir -p "$WORK/logs"
+if [[ $RUN_SIM -eq 1 ]]; then
+  cp "$SIMDIR/sim.log" "$WORK/logs/${NICK}_sim.log"
+fi
 DESIGNS="$WORK/designs"
 CFG_DIR="$DESIGNS/nangate45/$NICK"
 echo "== staging into $WORK =="
@@ -244,7 +259,23 @@ R="$WORK/logs/nangate45/$NICK/base/6_report.json"
 DRC="$WORK/reports/nangate45/$NICK/base/5_route_drc.rpt"
 
 set +e
-( cd "$ORFS/flow" && make "${MAKE_ARGS[@]}" finish ) > "$LOG" 2>&1
+# X6's 768 replicas are smaller than the old 1% total-flop tolerance. Check
+# their actual mapped drivers BEFORE spending a placement/routing run on them.
+( cd "$ORFS/flow" && make "${MAKE_ARGS[@]}" synth ) > "$LOG" 2>&1
+FLOW_RC=$?
+set -e
+if [[ $FLOW_RC -ne 0 ]]; then
+  echo "SYNTH FAILED (rc=$FLOW_RC). See $LOG" >&2
+  tail -15 "$LOG" >&2
+  exit "$FLOW_RC"
+fi
+if [[ "$DESIGN" == amx_fp8 ]]; then
+  python3 "$HERE/scripts/check_control_regs.py" \
+    "$WORK/results/nangate45/$NICK/base/1_2_yosys.v" --ctrl-reg "$CTRLREG" \
+    | tee "$WORK/logs/${NICK}_control_regs.log"
+fi
+set +e
+( cd "$ORFS/flow" && make "${MAKE_ARGS[@]}" finish ) >> "$LOG" 2>&1
 FLOW_RC=$?
 set -e
 if [[ $FLOW_RC -ne 0 ]]; then
@@ -291,6 +322,10 @@ if [[ $FLOW_RC -ne 0 ]]; then
 fi
 
 # ---------------------------------------------------------------- 4. extract
+if [[ ! -s "$WORK/results/nangate45/$NICK/base/6_final.gds" || ! -f "$DRC" ]]; then
+  echo "FATAL: final GDS or DRC report missing for $NICK" >&2
+  exit 1
+fi
 if [[ ! -s "$R" ]]; then
   echo "FATAL: no metrics at $R" >&2
   exit 1

@@ -150,7 +150,8 @@ def ladder(trials, design=None, multi=False):
     # level up: a rung has to be ONE change from the rung below it.
     best = {}
     for t in ok:
-        k = (t["knobs"]["PIPE"], t["knobs"].get("RD_REG", 0))
+        k = (t["knobs"]["PIPE"], t["knobs"].get("RD_REG", 0),
+             t["knobs"].get("CTRL_REG", 0), t["knobs"].get("CHAIN", 0))
         if k not in best or headline(t["metrics"])[0] > headline(best[k]["metrics"])[0]:
             best[k] = t
     print("Ladder economics, best result per RTL variant%s" % suffix)
@@ -163,7 +164,7 @@ def ladder(trials, design=None, multi=False):
         t = best[p]; m = t["metrics"]
         f, cls, trusted = headline(m)
         ff = m["flipflops"]
-        label = "P%d/RD%d" % p
+        label = "P%d/RD%d/C%d/H%d" % p if design == "amx_fp8" else "P%d/RD%d" % p[:2]
         df = dff = None
         if prev:
             df, dff = f - prev[0], ff - prev[1]
@@ -273,14 +274,40 @@ def full(trials):
         print()
 
 
+def throughput(trials):
+    """Rank only explicitly measured resident-tile intervals, never guess II."""
+    for design, rows in by_design(trials):
+        measured = [t for t in rows if t.get("metrics", {}) and
+                    t["metrics"].get("mac_throughput_gmac_s") is not None]
+        if not measured:
+            continue
+        print("Resident-tile throughput -- %s (STA-implied clock; transfers excluded)" % design)
+        print("  trial      CTRL CHAIN GMAC/s    MHz     II  latency  hold ns   DRC  result")
+        for t in sorted(measured, key=lambda t: t["metrics"]["mac_throughput_gmac_s"], reverse=True):
+            m = t["metrics"]
+            print("  %-10s %-4d %-5d %8.3f %7.1f %3d %8d %+8.4f %4d  %s" %
+                  (t["tag"], t["knobs"].get("CTRL_REG", 0), t["knobs"].get("CHAIN", 0), m["mac_throughput_gmac_s"],
+                   m["regreg_fmax_mhz"], m["initiation_interval_cycles"],
+                   m["completion_latency_cycles"], m["hold_ws_ns"], m["drc_lines"],
+                   t["result"]))
+        print("  Historical rows without measured II are omitted, not backfilled.")
+        print("  Compare OK rows with GDS present, DRC=0 and hold met; this is not signoff.\n")
+    if not any(t.get("metrics") and t["metrics"].get("mac_throughput_gmac_s") is not None
+               for t in trials):
+        print("No completed trials with measured resident-tile throughput yet.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--metric", default="area_um2")
     ap.add_argument("--full", action="store_true")
+    ap.add_argument("--throughput", action="store_true", help="rank measured resident-tile GMAC/s")
     a = ap.parse_args()
     trials = load()
     if a.full:
         full(trials)
+    elif a.throughput:
+        throughput(trials)
     else:
         # Grids first, then ladders, keeping the two-section shape RESULTS.md
         # mirrors with its headings rather than interleaving per design.

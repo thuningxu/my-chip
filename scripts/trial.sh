@@ -36,7 +36,7 @@ LOG_JSONL="$HERE/experiments/trials.jsonl"
 
 X=""; Y=""; GOAL=""
 DESIGN=amx_tdpbssd
-SAT=1; PIPE=0; RDREG=0; PERIOD=2.80; UTIL=40; HOLD_MARGIN=""
+SAT=1; PIPE=0; RDREG=0; CTRLREG=0; CHAIN=0; PERIOD=2.80; UTIL=40; HOLD_MARGIN=""
 # A written-down prediction the trial will CHECK, not merely sit next to. The
 # first X1-Y1 attempt was a duplicate of its own baseline for 17 minutes because
 # the flop count was logged and never compared to what the change had to add.
@@ -53,6 +53,8 @@ while [[ $# -gt 0 ]]; do
     -s) SAT="$2"; shift 2 ;;
     -P) PIPE="$2"; shift 2 ;;
     -R) RDREG="$2"; shift 2 ;;
+    --ctrl-reg) CTRLREG="$2"; shift 2 ;;
+    --chain) CHAIN="$2"; shift 2 ;;
     -p) PERIOD="$2"; shift 2 ;;
     -u) UTIL="$2"; shift 2 ;;
     --hold-margin) HOLD_MARGIN="$2"; shift 2 ;;
@@ -111,7 +113,7 @@ case "$DESIGN" in
     RTL_FILES=("$HERE/rtl/amx_fp8.v" "$HERE/rtl/fp8_mul.v" "$HERE/rtl/fp32_add.v")
     # No SAT: this design has no saturation parameter. Printing SAT=1 beside it
     # would be a banner describing a knob the hardware does not have.
-    KNOBS="PIPE=$PIPE RD_REG=$RDREG"
+    KNOBS="PIPE=$PIPE RD_REG=$RDREG CTRL_REG=$CTRLREG CHAIN=$CHAIN"
     ;;
   *) echo "FATAL: trial.sh has no nick and no RTL file list for design '$DESIGN'." >&2
      echo "       Supported: amx_tdpbssd, amx_fp8. Add a case rather than" >&2
@@ -146,8 +148,11 @@ fi
 # `shasum -a 256 <one file>` value, so the amx_tdpbssd shas already in
 # trials.jsonl stay comparable across this change.
 RTL_SHA=$(cat "${RTL_FILES[@]}" | "${SHA_CMD[@]}" | cut -c1-16)
-GIT_SHA=$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-DIRTY=$(git -C "$HERE" status --porcelain 2>/dev/null | head -1)
+# Frozen source snapshots need not be git worktrees. Record the originating
+# checkout explicitly while hashing the actual snapshot bytes above.
+GIT_ROOT="${TRIAL_GIT_ROOT:-$HERE}"
+GIT_SHA=$(git -C "$GIT_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+DIRTY=$(git -C "$GIT_ROOT" status --porcelain 2>/dev/null | head -1)
 
 echo "=============================================================="
 echo " TRIAL X${X}-Y${Y}   $DESIGN   $KNOBS"
@@ -167,7 +172,7 @@ set +e
 ORFS="$(sed -n 's/^ORFS *:= *//p' "$HERE/local.mk")" \
 YOSYS_EXE="$(sed -n 's/^YOSYS_EXE *:= *//p' "$HERE/local.mk")" \
 KLAYOUT_CMD="$(sed -n 's/^KLAYOUT_CMD *:= *//p' "$HERE/local.mk")" \
-  "$HERE/scripts/measure.sh" -d "$DESIGN" -s "$SAT" -P "$PIPE" -R "$RDREG" \
+  "$HERE/scripts/measure.sh" -d "$DESIGN" -s "$SAT" -P "$PIPE" -R "$RDREG" --ctrl-reg "$CTRLREG" --chain "$CHAIN" \
     -p "$PERIOD" -u "$UTIL" \
     -t "$TAG" ${HOLD_MARGIN:+--hold-margin "$HOLD_MARGIN"}
 RC=$?
@@ -223,7 +228,7 @@ if [[ -n "$EXPECT_FF" && -f "$NETLIST" ]]; then
 fi
 
 python3 - "$LOG_JSONL" "$R" "${DRC:-}" "${GDS:-}" "$NETLIST" "${LIMFILE:-}" <<PY
-import json, os, sys, subprocess
+import json, os, sys, subprocess, re
 jsonl, rep, drc, gds, netlist, limfile = sys.argv[1:7]
 rec = {
   "x": $X, "y": $Y, "tag": "$TAG", "design": "$DESIGN",
@@ -233,7 +238,14 @@ rec = {
             "hold_margin_ns": ${HOLD_MARGIN:-None}},
   "rtl_sha256_16": "$RTL_SHA", "git": "$GIT_SHA", "dirty": bool("""$DIRTY"""),
   "measure_rc": $RC,
+  "source_root": "$HERE",
 }
+if rec["design"] == "amx_fp8":
+    rec["knobs"].pop("SAT", None)
+    rec["knobs"]["CTRL_REG"] = $CTRLREG
+    rec["knobs"]["CHAIN"] = $CHAIN
+if os.environ.get("NUM_CORES"):
+    rec["knobs"]["num_cores"] = int(os.environ["NUM_CORES"])
 if $RC != 0 or not os.path.exists(rep):
     rec["result"] = "FAIL"
     rec["metrics"] = None
@@ -280,11 +292,39 @@ else:
             lim = {"error": "unreadable limiter.json: %s" % e}
     rec["metrics"]["limiter_class"]    = lim.get("limiter_class")
     rec["metrics"]["overall_endpoint"] = lim.get("overall_endpoint")
+    rec["metrics"]["overall_startpoint"] = lim.get("overall_startpoint")
     rec["metrics"]["regreg_ws_ns"]     = lim.get("regreg_ws_ns")
     rec["metrics"]["regreg_endpoint"]  = lim.get("regreg_endpoint")
+    rec["metrics"]["regreg_startpoint"] = lim.get("regreg_startpoint")
     _rr = lim.get("regreg_ws_ns")
     rec["metrics"]["regreg_fmax_mhz"] = (
         round(1000.0/($PERIOD - _rr), 1) if _rr is not None and ($PERIOD - _rr) > 0 else None)
+    if rec["design"] == "amx_fp8":
+        sim_path = "$HERE/work/logs/${NICK}_sim.log"
+        sim = open(sim_path).read() if os.path.exists(sim_path) else ""
+        match = re.search(r"^THROUGHPUT: macs_per_op=(\d+) initiation_interval_cycles=(\d+) "
+                          r"completion_latency_cycles=(\d+) resident_ops=(\d+)$", sim, re.M)
+        if not match or "RESULT: PASS" not in sim:
+            rec["result"] = "OK_BUT_NO_THROUGHPUT"
+            rec.setdefault("bugs", []).append("missing passing back-to-back throughput evidence")
+        else:
+            macs, ii, latency, ops = map(int, match.groups())
+            if macs != 16384 or ii <= 0 or latency <= 0 or ops < 2:
+                raise ValueError("invalid throughput evidence in " + sim_path)
+            if ii != 20 + $PIPE - $CHAIN or latency != 19 + $PIPE:
+                rec["result"] = "OK_BUT_WRONG_SCHEDULE"
+                rec.setdefault("bugs", []).append(
+                    "measured II/latency %d/%d differs from requested %d/%d"
+                    % (ii, latency, 20 + $PIPE - $CHAIN, 19 + $PIPE))
+            mm = rec["metrics"]
+            mm.update(macs_per_op=macs, initiation_interval_cycles=ii,
+                      completion_latency_cycles=latency, resident_ops=ops)
+            mm["mac_throughput_gmac_s"] = (
+                macs / (ii * ($PERIOD - _rr)) if _rr is not None and $PERIOD > _rr else None)
+            mm["throughput_scope"] = "resident tiles, transfers excluded; STA-implied clock"
+            if mm["mac_throughput_gmac_s"] is None:
+                rec["result"] = "OK_BUT_NO_THROUGHPUT"
+                rec.setdefault("bugs", []).append("no reg-to-reg timing for throughput")
     _cls = lim.get("limiter_class")
     if _cls is None:
         rec.setdefault("bugs", []).append(
@@ -298,8 +338,9 @@ else:
     # The two must agree. They did on every mac_array row; if they ever diverge
     # the run is not trustworthy and the divergence is itself the finding.
     if ${FLW:-None} is not None and abs(${FLW:-0} - ws) > 0.05:
-        rec["bugs"] = ["FLW-0009 (%.4f) disagrees with routed setup WS (%.4f) by >0.05 ns"
-                       % (${FLW:-0}, ws)]
+        rec.setdefault("bugs", []).append(
+            "FLW-0009 (%.4f) disagrees with routed setup WS (%.4f) by >0.05 ns"
+            % (${FLW:-0}, ws))
     if """$PRED_NOTE""".strip():
         rec.setdefault("bugs", []).append("""$PRED_NOTE""".strip())
         # A missed prediction demotes the result: the numbers are real but they
@@ -327,6 +368,13 @@ if rec["metrics"]:
     print("  setup %+.4f ns -> %.1f MHz | hold %+.4f (%d viol) | %d cells | %.0f um2 | DRC %d"
           % (mm["setup_ws_ns"], mm["implied_fmax_mhz"], mm["hold_ws_ns"],
              mm["hold_viol"], mm["stdcells"], mm["area_um2"], mm["drc_lines"]))
+    if mm.get("mac_throughput_gmac_s") is not None:
+        print("  %.3f GMAC/s | II %d | completion latency %d cycles (resident tiles)"
+              % (mm["mac_throughput_gmac_s"], mm["initiation_interval_cycles"],
+                 mm["completion_latency_cycles"]))
 else:
     print("  FAILED -- no metrics. That is still a data point.")
+sys.exit(0 if rec["result"] == "OK" else 1)
 PY
+[[ -z "$PRED_NOTE" ]] || exit 1
+exit "$RC"

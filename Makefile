@@ -49,6 +49,10 @@ PIPE   ?= 0
 # readback cycle, not throughput.
 RDREG  ?= 0
 
+# amx_fp8: registered, replicated epilogue control; no added cycle.
+CTRLREG ?= 0
+CHAIN   ?= 0
+
 # tb_fp32_add random-vector count. 20000 is the routine gate; the adder is the
 # block that appears 1024 times, so a deep run (NRAND=500000) before a release is
 # cheap insurance.
@@ -86,7 +90,7 @@ help:
 	@echo "  make sim-tpu         TPU systolic regression  (TN=$(TN) RDREG=$(RDREG))"
 	@echo "  make sim-fp8units    FP32 adder + FP8 multiplier, the leaf arithmetic"
 	@echo "  make sim-fp8         AMX-FP8 regression, all 4 ops (PIPE=$(PIPE) RDREG=$(RDREG))"
-	@echo "  make sim-matrix      all designs, all parameter states (34 configs)"
+	@echo "  make sim-matrix      all designs, all parameter states (46 configs)"
 	@echo "  make sim-all         run the regression at N=4,8,16"
 	@echo "  make golden          run the Python reference model"
 	@echo ""
@@ -177,12 +181,12 @@ sim-matrix:
 	    && echo "  PASS  tpu_mmu     N=$$n RD_REG=$$r" \
 	    || { echo "  FAIL  tpu_mmu     N=$$n RD_REG=$$r"; exit 1; }; \
 	done; done
-	@for r in 0 1; do for p in 0 1; do \
-	  $(MAKE) --no-print-directory sim-fp8 RDREG=$$r PIPE=$$p >/dev/null \
-	    && echo "  PASS  amx_fp8     PIPE=$$p RD_REG=$$r" \
-	    || { echo "  FAIL  amx_fp8     PIPE=$$p RD_REG=$$r"; exit 1; }; \
-	done; done
-	@echo "== all 34 configurations PASS =="
+	@for r in 0 1; do for p in 0 1; do for c in 0 1; do for h in 0 1; do \
+	  $(MAKE) --no-print-directory sim-fp8 RDREG=$$r PIPE=$$p CTRLREG=$$c CHAIN=$$h >/dev/null \
+	    && echo "  PASS  amx_fp8     PIPE=$$p RD_REG=$$r CTRL_REG=$$c CHAIN=$$h" \
+	    || { echo "  FAIL  amx_fp8     PIPE=$$p RD_REG=$$r CTRL_REG=$$c CHAIN=$$h"; exit 1; }; \
+	done; done; done; done
+	@echo "== all 46 configurations PASS =="
 
 .PHONY: sim-amx
 # The AMX regression. Separate target rather than a DESIGN switch on `sim`,
@@ -241,12 +245,13 @@ sim-fp8units: $(BUILD)
 # name would leave only the last one on disk -- so the log you open to diagnose a
 # failure would be a different configuration's than the one that failed.
 sim-fp8: $(BUILD)
-	@echo "== AMX-FP8 regression PIPE=$(PIPE) RD_REG=$(RDREG) =="
-	@$(IVERILOG) -g2005 -o $(BUILD)/tb_amx_fp8_p$(PIPE)_r$(RDREG).vvp \
-	  -Ptb_amx_fp8.PIPE=$(PIPE) -Ptb_amx_fp8.RD_REG=$(RDREG) \
+	@echo "== AMX-FP8 regression PIPE=$(PIPE) RD_REG=$(RDREG) CTRL_REG=$(CTRLREG) CHAIN=$(CHAIN) =="
+	@$(IVERILOG) -g2005 -o $(BUILD)/tb_amx_fp8_p$(PIPE)_r$(RDREG)_c$(CTRLREG)_h$(CHAIN).vvp \
+	  -Ptb_amx_fp8.PIPE=$(PIPE) -Ptb_amx_fp8.RD_REG=$(RDREG) -Ptb_amx_fp8.CTRL_REG=$(CTRLREG) \
+	  -Ptb_amx_fp8.CHAIN=$(CHAIN) \
 	  tb/tb_amx_fp8.v rtl/amx_fp8.v rtl/fp8_mul.v rtl/fp32_add.v
-	@vvp $(BUILD)/tb_amx_fp8_p$(PIPE)_r$(RDREG).vvp | tee $(BUILD)/sim_amx_fp8_p$(PIPE)_r$(RDREG).log
-	@grep -q '^RESULT: PASS' $(BUILD)/sim_amx_fp8_p$(PIPE)_r$(RDREG).log \
+	@vvp $(BUILD)/tb_amx_fp8_p$(PIPE)_r$(RDREG)_c$(CTRLREG)_h$(CHAIN).vvp | tee $(BUILD)/sim_amx_fp8_p$(PIPE)_r$(RDREG)_c$(CTRLREG)_h$(CHAIN).log
+	@grep -q '^RESULT: PASS' $(BUILD)/sim_amx_fp8_p$(PIPE)_r$(RDREG)_c$(CTRLREG)_h$(CHAIN).log \
 	  || { echo "AMX-FP8 regression FAILED"; exit 1; }
 
 .PHONY: golden
@@ -277,7 +282,7 @@ schematic:
 measure: require-setup
 	@ORFS="$(ORFS)" YOSYS_EXE="$(YOSYS_EXE)" KLAYOUT_CMD="$(KLAYOUT_CMD)" \
 	  ./scripts/measure.sh -d $(DESIGN) -n $(N) -c $(CPORT) -r $(OUTPAR) -s $(SAT) -R $(RDREG) \
-	     -P $(PIPE) -T $(TN) -p $(PERIOD) -u $(UTIL) $(if $(TAG),-t $(TAG),)
+	     -P $(PIPE) --ctrl-reg $(CTRLREG) --chain $(CHAIN) -T $(TN) -p $(PERIOD) -u $(UTIL) $(if $(TAG),-t $(TAG),)
 
 # Build/rebuild the GDS for an already-routed config, without re-running the
 # flow. measure.sh does this inline now; this is for configs routed before that
