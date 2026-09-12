@@ -17,7 +17,7 @@ Four designs live here, selected with `DESIGN=`:
 | **`amx_fp8`** | **Intel AMX-FP8** (Diamond Rapids) — all four mix-and-match variants (`TDPBF8PS`/`TDPBHF8PS`/`TDPHBF8PS`/`TDPHF8PS`) in one netlist, selected at *runtime* by `op[1:0]`. `C += A@B` on `(16,64)@(64,16)`, fp8 in, **IEEE FP32 accumulate**. Same operand delivery as `amx_tdpbssd`, so the delta is purely the arithmetic. `PIPE=1` registers the product to get the operand mux and the multiply out of the accumulate loop | 1024 mult + **1024 FP32 adders**, 20+`PIPE` cycles |
 
 ```bash
-make sim-matrix                          # all designs, all parameter states (34)
+make sim-matrix                          # all designs, all parameter states (46)
 make measure DESIGN=amx_tdpbssd SAT=1    # synth + P&R one of them
 make measure DESIGN=tpu_mmu TN=32 RDREG=1
 make measure DESIGN=amx_fp8 RDREG=1 PIPE=1
@@ -285,13 +285,28 @@ SDC's pad convention rather than the hardware.
 | `mac_array` | 783 MHz at N=4, 748 at N=16 | v0 baseline. Setup not met at 1.00 ns; multiply and a 24-bit add share a cycle |
 | `amx_tdpbssd` | **698.9 MHz / 2.436 W** at `PIPE=3 RD_REG=1` | X1–X4 **closed**. Limited by a multiplier carry-propagate at ~703 MHz; 1.40 ns is the knee, past which power is the cost and frequency is not the return |
 | `tpu_mmu` | 3N cycles at `TN=32` | one row, systolic-vs-broadcast at matched multiplier count. **Hold is violated — not signoff-clean**, `--hold-margin` was omitted |
-| `amx_fp8` | **212.6 MHz / 14.09 W** at `PIPE=1 RD_REG=1` | X5 **open**. `PIPE=1` bought +14.7% throughput and −65% power, and falsified X5's own floor: the limiter is a control path from `ccnt`, not the accumulate loop |
+| `amx_fp8` | **210.5 GMAC/s**, 256.9 MHz / 14.45 W at `PIPE=1 RD_REG=1 CTRL_REG=1 CHAIN=1` | X5–X7. **+45.5%** completed throughput over X5-Y0, at initiation interval 20 and latency 20. Hold passes and DRC=0, but setup misses 3.80 ns by 92 ps; clock and throughput are STA-implied, not timing-closed |
 
-The headline comparison the project exists to make: **bit-exact IEEE FP32
-accumulation costs 3.45× the throughput and 6.49× the cells of INT32 accumulation**
-at identical MAC count and operand delivery — down from 3.99× and 7.48× before
-`PIPE=1`. Cycle counts now differ (21 vs 20), so the throughput ratio is no longer
-the frequency ratio; see the correction in `EXPERIMENTS.md`.
+The comparison this project exists to make: **bit-exact IEEE FP32 accumulation
+costs 2.72× the throughput and 6.02× the cells of INT32 accumulation** at
+identical MAC count and operand delivery. That penalty has fallen twice —
+3.99×/7.48× at X5-Y0, 3.45×/6.49× after `PIPE=1`, 2.72×/6.02× after the epilogue
+control register and the chained handshake. None of it came from touching the FP32
+arithmetic.
+
+Ranked on **completed resident-tile throughput**, not MHz, and the distinction
+earned its keep: X7's `CHAIN` moved the clock +0.08% and throughput **+5.094%**, by
+cutting the initiation interval from 21 to 20 cycles. An MHz-ranked hillclimb would
+have discarded it as flat. Cycle counts differ between the designs (20 vs 21 before
+`CHAIN`), so the throughput ratio is not the frequency ratio — see the correction in
+`EXPERIMENTS.md`.
+
+**One caveat on the INT8 anchor.** The 698.9 MHz figure above was measured with a
+reg→reg STA query that was corrected during X6; it could admit an input-port launch,
+and its routed database has since been deleted, so it is labelled rather than
+re-derived. Every ratio in this section inherits that and should be read as
+approximate. The `amx_fp8` rows are all post-fix and unaffected. Details in
+`experiments/harness.md`.
 
 Two campaigns of reasoning are logged separately from the rows:
 `experiments/harness.md` declares each generation *before* its trials run, and

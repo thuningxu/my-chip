@@ -11,6 +11,47 @@
 `measure.sh` tells you the number; `report_path.sh` tells you what to change to
 improve it. Use both — a row without a known limiter is a row you cannot act on.
 
+## X6: two concurrent FP8 throughput trials
+
+`bash scripts/launch_x6.sh` launches exactly the pair declared in
+`experiments/harness.md`: `CTRL_REG=0` and `1`, both `PIPE=1 RD_REG=1`, at
+4.00 ns / 40% utilization / 0.05 ns hold margin, with 32 threads per flow.
+The launcher refuses existing X6 artifact names. It snapshots RTL, tests,
+scripts, templates, and tool paths into `work/campaigns/x6/source/`; subsequent
+checkout edits cannot change these running trials. The foreground supervisor
+waits for both jobs and must be kept in a persistent terminal session.
+
+Read `work/campaigns/x6/x6y{0,1}.log` and `.status` for progress. Standard ORFS
+logs remain at `work/logs/fp8_x6y{0,1}_flow.log`. After completion, run
+`python3 scripts/trials.py --throughput` to rank measured resident-tile GMAC/s.
+New rows include measured initiation interval, completion latency, and path
+startpoints; old rows without measured intervals are not silently backfilled.
+
+`check_control_regs.py` checks actual mapped-flop Q connections after synthesis
+and refuses placement if any of the 768 local control drivers were merged away.
+`python3 -m unittest discover -s tb -p 'test_x6_harness.py' -v` tests this gate
+and trial logging without running EDA or changing the real ledger.
+
+Once the first pair has finished, `bash scripts/launch_x6.sh --tighten` launches
+X6-Y2/Y3 at 3.80/3.60 ns, both with `CTRL_REG=1`, under
+`work/campaigns/x6_timing/`. This mode checks that the original pair exited zero
+and that RTL, the array testbench, flow templates and tool paths are byte-identical
+to its source snapshot. `--dry-run` performs the checks and previews either
+pair without creating files or starting jobs. Neither mode reuses artifacts.
+
+## X7: completion-edge chaining
+
+`bash scripts/launch_x7.sh --dry-run` checks/previews the declared X7 pair;
+without `--dry-run` it freezes inputs under `work/campaigns/x7/source/` and
+launches `fp8_x7y0` / `fp8_x7y1`, `CHAIN=0/1`, at 3.80 ns and 32 threads each.
+The prior X6 pairs must have completed successfully and artifact names must be
+unused. Arithmetic leaves and flow templates must still match the X6 snapshot.
+The shared simulation gate receives CHAIN alongside all other hardware knobs.
+Trial logging verifies measured II/latency against the requested schedule and
+records CHAIN explicitly; a dropped parameter cannot produce an OK schedule row.
+Use `work/campaigns/x7/x7y{0,1}.{log,status}` for progress and
+`python3 scripts/trials.py --throughput` for completed results.
+
 ## Design parameters every script must agree on
 
 `N`, `C_PORT` and `OUT_PAR` all change the hardware, so every script that names,
